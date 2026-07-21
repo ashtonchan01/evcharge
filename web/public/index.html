@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solar EV Charging</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>☀️ Solar EV Charging</h1>
+      <span id="conn-indicator" class="dot dot-off" title="connection status"></span>
+    </header>
+
+    <section class="cards">
+      <div class="card">
+        <h2>Solar</h2>
+        <dl>
+          <dt>PV production</dt><dd id="pv">–</dd>
+          <dt>Household load</dt><dd id="load">–</dd>
+          <dt>Grid</dt><dd id="grid">–</dd>
+          <dt>Surplus for EV</dt><dd id="surplus">–</dd>
+        </dl>
+      </div>
+
+      <div class="card">
+        <h2>Vehicle</h2>
+        <dl>
+          <dt>Plugged in</dt><dd id="plugged">–</dd>
+          <dt>Charging state</dt><dd id="charging-state">–</dd>
+          <dt>Battery</dt><dd id="battery">–</dd>
+          <dt>Charge amps</dt><dd id="amps">–</dd>
+        </dl>
+      </div>
+
+      <div class="card">
+        <h2>Controller</h2>
+        <dl>
+          <dt>Decision</dt><dd id="decision">–</dd>
+          <dt>Target amps</dt><dd id="target-amps">–</dd>
+          <dt>Mode</dt><dd id="mode">–</dd>
+          <dt>Last poll</dt><dd id="last-poll">–</dd>
+        </dl>
+        <p id="last-error" class="error"></p>
+      </div>
+    </section>
+
+    <section class="override">
+      <h2>Manual override</h2>
+      <div class="controls">
+        <button data-mode="auto">Auto (solar-following)</button>
+        <button data-mode="force_on">Force charge on</button>
+        <button data-mode="force_off">Force charge off</button>
+        <label>
+          Amps (force on only)
+          <input id="amps-input" type="number" min="0" max="48" placeholder="max" />
+        </label>
+      </div>
+      <div class="token-row">
+        <label>
+          Override token
+          <input id="token-input" type="password" placeholder="x-override-token" />
+        </label>
+        <button id="save-token">Remember</button>
+      </div>
+      <p id="override-message"></p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
