@@ -1,10 +1,10 @@
 import fetch from "cross-fetch";
-import fs from "node:fs";
-import https from "node:https";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "tesla" });
+
+const TESLA_AUTH_URL = "https://auth.tesla.com/oauth2/v3/token";
 
 export interface VehicleChargeState {
   chargingState: string; // "Charging" | "Stopped" | "Complete" | "Disconnected" | ...
@@ -17,42 +17,76 @@ export interface VehicleChargeState {
   timestamp: Date;
 }
 
+export interface VehicleSummary {
+  id: string;
+  vin: string;
+  displayName: string;
+  state: string;
+}
+
 /**
- * Talks only to a local/trusted instance of Tesla's open-source
- * `tesla-http-proxy`, which owns the vehicle command signing key and
- * forwards signed commands to the real Fleet API. This client never
- * touches Tesla's servers directly and never sees the signing key.
+ * Calls Tesla's Fleet API directly. This is only safe for vehicles that
+ * don't require the signed "vehicle command protocol" (pre-2021 cars on
+ * older infotainment firmware) - those vehicles accept plain OAuth-token
+ * authenticated commands with no virtual key pairing. Newer vehicles
+ * require routing through a signed-command proxy instead.
  */
 export class TeslaFleetClient {
-  private readonly agent?: https.Agent;
+  private accessToken: string | null = null;
+  private readonly baseUrl: string;
 
   constructor(
-    private readonly proxyUrl: string,
-    private readonly accessToken: string,
-    private readonly vehicleTag: string,
-    proxyCaPath?: string
+    baseUrl: string,
+    private readonly clientId: string,
+    private readonly clientSecret: string,
+    private readonly refreshToken: string,
+    private readonly vehicleTag: string
   ) {
-    this.proxyUrl = proxyUrl.replace(/\/+$/, "");
-    if (proxyCaPath) {
-      this.agent = new https.Agent({ ca: fs.readFileSync(proxyCaPath) });
-    }
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 
-  private async request<T>(
-    method: "GET" | "POST",
-    path: string,
-    body?: unknown
-  ): Promise<T> {
-    const res = await fetch(`${this.proxyUrl}${path}`, {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.accessToken}`,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      // @ts-expect-error - node fetch accepts an agent for TLS trust
-      agent: this.agent,
+  private async refreshAccessToken(): Promise<string> {
+    log.debug("Refreshing Tesla access token");
+    const res = await fetch(TESLA_AUTH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+        refresh_token: this.refreshToken,
+      }),
     });
+
+    if (!res.ok) {
+      throw new Error(`Tesla token refresh failed: HTTP ${res.status} ${await res.text()}`);
+    }
+
+    const body = (await res.json()) as { access_token: string };
+    this.accessToken = body.access_token;
+    return this.accessToken;
+  }
+
+  private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+    if (!this.accessToken) {
+      await this.refreshAccessToken();
+    }
+
+    const doRequest = async (token: string) =>
+      fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+    let res = await doRequest(this.accessToken!);
+    if (res.status === 401) {
+      const fresh = await this.refreshAccessToken();
+      res = await doRequest(fresh);
+    }
 
     const text = await res.text();
     let parsed: unknown;
@@ -63,9 +97,7 @@ export class TeslaFleetClient {
     }
 
     if (!res.ok) {
-      throw new Error(
-        `Tesla proxy request ${method} ${path} failed: HTTP ${res.status} ${text}`
-      );
+      throw new Error(`Tesla request ${method} ${path} failed: HTTP ${res.status} ${text}`);
     }
 
     return parsed as T;
@@ -77,6 +109,19 @@ export class TeslaFleetClient {
       `/api/1/vehicles/${this.vehicleTag}/command/${name}`,
       body ?? {}
     );
+  }
+
+  async listVehicles(): Promise<VehicleSummary[]> {
+    const res = await this.request<{ response: Record<string, unknown>[] }>(
+      "GET",
+      "/api/1/vehicles"
+    );
+    return (res.response ?? []).map((v) => ({
+      id: String(v.id_s ?? v.id),
+      vin: String(v.vin),
+      displayName: String(v.display_name ?? ""),
+      state: String(v.state ?? "unknown"),
+    }));
   }
 
   async getChargeState(): Promise<VehicleChargeState> {
@@ -122,9 +167,10 @@ export class TeslaFleetClient {
 
 export function createTeslaClient(): TeslaFleetClient {
   return new TeslaFleetClient(
-    config.tesla.proxyUrl,
-    config.tesla.accessToken,
-    config.tesla.vehicleTag,
-    config.tesla.proxyCaPath
+    config.tesla.baseUrl,
+    config.tesla.clientId,
+    config.tesla.clientSecret,
+    config.tesla.refreshToken,
+    config.tesla.vehicleTag
   );
 }

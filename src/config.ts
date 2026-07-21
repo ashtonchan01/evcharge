@@ -28,10 +28,11 @@ const schema = z.object({
   GOODWE_STATION_ID: z.string().min(1),
   GOODWE_SEMS_BASE_URL: z.string().default("https://eu.semsportal.com/api"),
 
-  TESLA_PROXY_URL: z.string().min(1),
-  TESLA_ACCESS_TOKEN: z.string().min(1),
+  TESLA_FLEET_API_BASE_URL: z.string().default("https://fleet-api.prd.na.vehicle-command.psf.tesla.com"),
+  TESLA_CLIENT_ID: z.string().min(1),
+  TESLA_CLIENT_SECRET: z.string().min(1),
+  TESLA_REFRESH_TOKEN: z.string().min(1),
   TESLA_VEHICLE_TAG: z.string().min(1),
-  TESLA_PROXY_CA_PATH: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -68,9 +69,10 @@ export const config = {
   },
 
   tesla: {
-    proxyUrl: env.TESLA_PROXY_URL,
-    accessToken: env.TESLA_ACCESS_TOKEN,
+    baseUrl: env.TESLA_FLEET_API_BASE_URL,
+    clientId: env.TESLA_CLIENT_ID,
+    clientSecret: env.TESLA_CLIENT_SECRET,
+    refreshToken: env.TESLA_REFRESH_TOKEN,
     vehicleTag: env.TESLA_VEHICLE_TAG,
-    proxyCaPath: env.TESLA_PROXY_CA_PATH || undefined,
   },
 };

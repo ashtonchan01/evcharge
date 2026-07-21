@@ -12,7 +12,7 @@ const tesla = createTeslaClient();
 const controller = new ChargeController(goodwe, tesla);
 
 controller.start();
-startServer(controller);
+startServer(controller, tesla);
 
 process.on("SIGINT", () => {
   log.info("Shutting down");

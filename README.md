@@ -8,7 +8,7 @@ manually override.
 ## How it works
 
 ```
-GoodWe SEMS portal  --poll-->  controller  --signed command-->  tesla-http-proxy  -->  Tesla Fleet API
+GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
                                     |
                                     v
                             Express + WebSocket API  -->  dashboard (web/public)
@@ -16,11 +16,13 @@ GoodWe SEMS portal  --poll-->  controller  --signed command-->  tesla-http-proxy
 
 - **src/goodwe/client.ts** — logs into the SEMS cloud portal and reads PV
   production, household load, and grid import/export.
-- **src/tesla/client.ts** — talks to a local instance of Tesla's
-  open-source [`tesla-http-proxy`](https://github.com/teslamotors/vehicle-command/tree/main/cmd/tesla-http-proxy),
-  which holds the vehicle command signing key and forwards signed commands
-  to the Fleet API. This app never sees the private key or calls Tesla
-  directly.
+- **src/tesla/client.ts** — calls Tesla's Fleet API directly using an
+  OAuth refresh token (auto-refreshing short-lived access tokens as
+  needed). This only works for vehicles that don't require Tesla's signed
+  "vehicle command protocol" virtual-key pairing - roughly pre-2021 cars
+  on older infotainment firmware. Newer vehicles would need commands
+  routed through a signed-command proxy (e.g. Tesla's open-source
+  `tesla-http-proxy`) instead.
 - **src/controller/index.ts** — every `POLL_INTERVAL_MS`, computes
   `surplus = pvPower - householdLoad - buffer`, converts it to an amp
   target, and starts/stops/adjusts the car's charge rate. Uses
@@ -36,13 +38,17 @@ GoodWe SEMS portal  --poll-->  controller  --signed command-->  tesla-http-proxy
 1. `npm install`
 2. Copy `.env.example` to `.env` and fill in:
    - Your SEMS portal account/password and power station ID.
-   - A running `tesla-http-proxy` URL + a Fleet API OAuth access token
-     scoped to `vehicle_device_data` and `vehicle_cmds`, plus your
-     vehicle's ID/VIN.
+   - A Tesla developer app (from developer.tesla.com) Client ID/Secret,
+     an OAuth refresh token (from the authorization-code exchange, scoped
+     to at least `vehicle_device_data` and `vehicle_charging_cmds`), and
+     your target vehicle's ID/VIN.
    - An `OVERRIDE_TOKEN` (`openssl rand -hex 32`) to protect the manual
-     override endpoint.
+     override and vehicle-lookup endpoints.
 3. `npm run dev` (or `npm run build && npm start`).
 4. Open `http://localhost:3000`.
+5. To find a vehicle's id/VIN, call `GET /api/vehicles` with an
+   `x-override-token` header once the server is running - it lists every
+   vehicle on the account.
 
 ## Tuning
 

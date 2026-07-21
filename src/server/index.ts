@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
 import { ChargeController, OverrideMode } from "../controller/index.js";
+import { TeslaFleetClient } from "../tesla/client.js";
 import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "server" });
@@ -23,13 +24,21 @@ function requireOverrideToken(
   next();
 }
 
-export function createApp(controller: ChargeController) {
+export function createApp(controller: ChargeController, tesla: TeslaFleetClient) {
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(__dirname, "../../web/public")));
 
   app.get("/api/status", (_req, res) => {
     res.json(controller.getStatus());
+  });
+
+  app.get("/api/vehicles", requireOverrideToken, async (_req, res) => {
+    try {
+      res.json(await tesla.listVehicles());
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.post("/api/override", requireOverrideToken, (req, res) => {
@@ -52,8 +61,8 @@ export function createApp(controller: ChargeController) {
   return app;
 }
 
-export function startServer(controller: ChargeController) {
-  const app = createApp(controller);
+export function startServer(controller: ChargeController, tesla: TeslaFleetClient) {
+  const app = createApp(controller, tesla);
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
