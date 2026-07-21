@@ -49,7 +49,12 @@ export class TeslaFleetClient {
     log.debug("Refreshing Tesla access token");
     const res = await fetch(TESLA_AUTH_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "application/json",
+      },
       body: new URLSearchParams({
         grant_type: "refresh_token",
         client_id: this.clientId,
@@ -78,6 +83,8 @@ export class TeslaFleetClient {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          "User-Agent":
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         },
         body: body ? JSON.stringify(body) : undefined,
       });

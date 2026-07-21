@@ -72,7 +72,7 @@ export class GoodweSemsClient {
     }
 
     const body = (await res.json()) as SemsLoginResponse;
-    if (body.code !== 1 || !body.data?.token) {
+    if (!body.data?.token) {
       throw new Error(`SEMS login rejected: ${body.msg ?? "unknown error"}`);
     }
 
