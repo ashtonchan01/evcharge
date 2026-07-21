@@ -133,6 +133,8 @@ export class GoodweSemsClient {
       { powerStationId: this.stationId }
     );
 
+    log.debug({ body }, "Raw SEMS monitor-detail response");
+
     const data = body.data ?? {};
     const kpi = (data.kpi ?? {}) as Record<string, unknown>;
 
