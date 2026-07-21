@@ -3,6 +3,17 @@ import { config } from "../config.js";
 import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "goodwe" });
+const REQUEST_TIMEOUT_MS = 20_000;
+
+async function fetchWithTimeout(url: string, init: Record<string, unknown>): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface SolarSnapshot {
   timestamp: Date;
@@ -51,7 +62,7 @@ export class GoodweSemsClient {
   }
 
   private async login(): Promise<SemsTokenBundle> {
-    const res = await fetch(`${this.baseUrl}/v2/Common/CrossLogin`, {
+    const res = await fetchWithTimeout(`${this.baseUrl}/v2/Common/CrossLogin`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -100,7 +111,7 @@ export class GoodweSemsClient {
     let bundle = await this.getTokenBundle();
 
     const doRequest = async (t: SemsTokenBundle) =>
-      fetch(`${this.baseUrl}${path}`, {
+      fetchWithTimeout(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

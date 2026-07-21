@@ -90,7 +90,8 @@ export class ChargeController extends EventEmitter {
       const [solar, vehicle] = await Promise.all([
         this.goodwe.getSnapshot(),
         this.tesla.getChargeState().catch((err) => {
-          log.warn({ err: String(err) }, "Vehicle unreachable this cycle");
+          log.warn({ err: String(err) }, "Vehicle unreachable this cycle - sending wake_up for next poll");
+          this.tesla.wakeUp().catch((wakeErr) => log.debug({ err: String(wakeErr) }, "wake_up failed"));
           return null;
         }),
       ]);

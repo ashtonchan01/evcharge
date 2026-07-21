@@ -5,6 +5,17 @@ import { logger } from "../util/logger.js";
 const log = logger.child({ module: "tesla" });
 
 const TESLA_AUTH_URL = "https://auth.tesla.com/oauth2/v3/token";
+const REQUEST_TIMEOUT_MS = 20_000;
+
+async function fetchWithTimeout(url: string, init: Record<string, unknown>): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface VehicleChargeState {
   chargingState: string; // "Charging" | "Stopped" | "Complete" | "Disconnected" | ...
@@ -47,7 +58,7 @@ export class TeslaFleetClient {
 
   private async refreshAccessToken(): Promise<string> {
     log.debug("Refreshing Tesla access token");
-    const res = await fetch(TESLA_AUTH_URL, {
+    const res = await fetchWithTimeout(TESLA_AUTH_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -78,7 +89,7 @@ export class TeslaFleetClient {
     }
 
     const doRequest = async (token: string) =>
-      fetch(`${this.baseUrl}${path}`, {
+      fetchWithTimeout(`${this.baseUrl}${path}`, {
         method,
         headers: {
           "Content-Type": "application/json",
