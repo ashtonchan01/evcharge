@@ -39,6 +39,8 @@ interface SemsLoginResponse {
     token: string;
     uid: string;
     timestamp: number;
+    /** Region-specific API domain this account's token is actually valid against. */
+    api?: string;
   };
   code: number;
   msg: string;
@@ -96,6 +98,17 @@ export class GoodweSemsClient {
       throw new Error(`SEMS login rejected: ${body.msg ?? "unknown error"}`);
     }
 
+    if (body.data.api) {
+      const regionalBaseUrl = body.data.api.replace(/\/+$/, "");
+      if (regionalBaseUrl !== this.baseUrl) {
+        log.debug(
+          { from: this.baseUrl, to: regionalBaseUrl },
+          "Switching to account's region-specific SEMS API domain"
+        );
+        this.baseUrl = regionalBaseUrl;
+      }
+    }
+
     const raw = JSON.stringify({
       uid: body.data.uid,
       timestamp: body.data.timestamp,
@@ -139,7 +152,20 @@ export class GoodweSemsClient {
       throw new Error(`SEMS request to ${path} failed: HTTP ${res.status}`);
     }
 
-    return (await res.json()) as T;
+    let json = (await res.json()) as { code?: number; msg?: string } & T;
+    // SEMS reports expired/invalid sessions as HTTP 200 with an
+    // application-level error code rather than HTTP 401 - retry once
+    // with a forced re-login when that happens.
+    if (json.code === 100002) {
+      bundle = await this.getTokenBundle(true);
+      res = await doRequest(bundle);
+      if (!res.ok) {
+        throw new Error(`SEMS request to ${path} failed: HTTP ${res.status}`);
+      }
+      json = (await res.json()) as { code?: number; msg?: string } & T;
+    }
+
+    return json;
   }
 
   /**
