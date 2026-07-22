@@ -26,7 +26,7 @@ const schema = z.object({
   GOODWE_SEMS_ACCOUNT: z.string().min(1),
   GOODWE_SEMS_PASSWORD: z.string().min(1),
   GOODWE_STATION_ID: z.string().min(1),
-  GOODWE_SEMS_BASE_URL: z.string().default("https://eu.semsportal.com/api"),
+  GOODWE_SEMS_BASE_URL: z.string().default("https://www.semsportal.com/api"),
 
   TESLA_FLEET_API_BASE_URL: z.string().default("https://fleet-api.prd.na.vehicle-command.psf.tesla.com"),
   TESLA_CLIENT_ID: z.string().min(1),
