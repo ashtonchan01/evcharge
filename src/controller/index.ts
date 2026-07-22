@@ -21,6 +21,7 @@ export interface ControllerStatus {
   targetAmps: number | null;
   decision: "charging" | "idle" | "waiting_for_stability" | "unavailable";
   override: OverrideState;
+  gridImportBufferW: number;
   lastError: string | null;
   lastPollAt: Date | null;
 }
@@ -38,7 +39,8 @@ export class ChargeController extends EventEmitter {
     surplusW: null,
     targetAmps: null,
     decision: "unavailable",
-    override: { enabled: true, setAt: null, setBy: null },
+    override: { enabled: false, setAt: null, setBy: null },
+    gridImportBufferW: 0,
     lastError: null,
     lastPollAt: null,
   };
@@ -80,6 +82,12 @@ export class ChargeController extends EventEmitter {
     this.emitUpdate();
   }
 
+  setGridImportBufferW(bufferW: number, setBy: string): void {
+    log.info({ bufferW, setBy }, "Grid import buffer changed");
+    this.status.gridImportBufferW = bufferW;
+    this.emitUpdate();
+  }
+
   setVehicleTag(tag: string, setBy: string): void {
     log.info({ tag, setBy }, "Switching active vehicle");
     this.tesla.setVehicleTag(tag);
@@ -112,7 +120,7 @@ export class ChargeController extends EventEmitter {
       this.status.lastPollAt = new Date();
       this.status.lastError = null;
 
-      const surplusW = solar.pvPowerW - solar.loadPowerW - config.gridImportBufferW;
+      const surplusW = solar.pvPowerW - solar.loadPowerW - this.status.gridImportBufferW;
       this.status.surplusW = surplusW;
 
       await this.decide(surplusW, vehicle);

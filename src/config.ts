@@ -10,12 +10,10 @@ const numeric = () =>
 const schema = z.object({
   PORT: numeric().default("3000"),
   LOG_LEVEL: z.string().default("info"),
-  OVERRIDE_TOKEN: z.string().min(1, "OVERRIDE_TOKEN must be set"),
 
   POLL_INTERVAL_MS: numeric().default("30000"),
   MIN_SURPLUS_START_W: numeric().default("1400"),
   MIN_SURPLUS_STOP_W: numeric().default("200"),
-  GRID_IMPORT_BUFFER_W: numeric().default("150"),
   CHARGER_VOLTAGE: numeric().default("240"),
   CHARGER_PHASES: numeric().default("1"),
   MIN_CHARGE_AMPS: numeric().default("5"),
@@ -53,12 +51,10 @@ const env = parsed.data;
 export const config = {
   port: env.PORT!,
   logLevel: env.LOG_LEVEL,
-  overrideToken: env.OVERRIDE_TOKEN,
 
   pollIntervalMs: env.POLL_INTERVAL_MS!,
   minSurplusStartW: env.MIN_SURPLUS_START_W!,
   minSurplusStopW: env.MIN_SURPLUS_STOP_W!,
-  gridImportBufferW: env.GRID_IMPORT_BUFFER_W!,
   chargerVoltage: env.CHARGER_VOLTAGE!,
   chargerPhases: env.CHARGER_PHASES!,
   minChargeAmps: env.MIN_CHARGE_AMPS!,

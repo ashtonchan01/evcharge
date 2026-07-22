@@ -1,12 +1,4 @@
 const $ = (id) => document.getElementById(id);
-const tokenKey = "evcharge-override-token";
-
-$("token-input").value = localStorage.getItem(tokenKey) || "";
-$("save-token").addEventListener("click", () => {
-  localStorage.setItem(tokenKey, $("token-input").value);
-  flash("override-message", "Token saved locally.");
-  loadVehicles();
-});
 
 function fmtW(w) {
   if (w === null || w === undefined) return "–";
@@ -52,6 +44,11 @@ function render(status) {
   if (status.vehicleTag && [...select.options].some((o) => o.value === status.vehicleTag)) {
     select.value = status.vehicleTag;
   }
+
+  const bufferInput = $("buffer-input");
+  if (document.activeElement !== bufferInput) {
+    bufferInput.value = status.gridImportBufferW || "";
+  }
 }
 
 async function fetchStatus() {
@@ -60,10 +57,7 @@ async function fetchStatus() {
 }
 
 async function loadVehicles() {
-  const token = localStorage.getItem(tokenKey) || "";
-  if (!token) return;
-
-  const res = await fetch("/api/vehicles", { headers: { "x-override-token": token } });
+  const res = await fetch("/api/vehicles");
   if (!res.ok) return;
 
   const vehicles = await res.json();
@@ -82,11 +76,10 @@ async function loadVehicles() {
 $("vehicle-select").addEventListener("change", async (e) => {
   const tag = e.target.value;
   if (!tag) return;
-  const token = localStorage.getItem(tokenKey) || "";
 
   const res = await fetch("/api/vehicle", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-override-token": token },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tag }),
   });
 
@@ -102,11 +95,10 @@ $("vehicle-select").addEventListener("change", async (e) => {
 
 $("enabled-toggle").addEventListener("change", async (e) => {
   const enabled = e.target.checked;
-  const token = localStorage.getItem(tokenKey) || "";
 
   const res = await fetch("/api/enabled", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-override-token": token },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
   });
 
@@ -119,6 +111,32 @@ $("enabled-toggle").addEventListener("change", async (e) => {
 
   render(await res.json());
   flash("override-message", enabled ? "Solar charging turned on." : "Solar charging turned off.");
+});
+
+$("buffer-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const raw = $("buffer-input").value;
+  const bufferW = raw === "" ? 0 : Number(raw);
+
+  if (!Number.isFinite(bufferW) || bufferW < 0) {
+    flash("override-message", "Buffer must be a non-negative number.");
+    return;
+  }
+
+  const res = await fetch("/api/buffer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bufferW }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    flash("override-message", `Error: ${body.error || res.status}`);
+    return;
+  }
+
+  render(await res.json());
+  flash("override-message", `Grid import buffer set to ${bufferW} W.`);
 });
 
 function connectWs() {

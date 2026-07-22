@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Solar EV Charging</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -59,13 +59,13 @@
         </label>
         <span id="enabled-label">On</span>
       </div>
-      <div class="token-row">
+      <form id="buffer-form" class="controls">
         <label>
-          Override token
-          <input id="token-input" type="password" placeholder="x-override-token" />
+          Grid import buffer (W)
+          <input id="buffer-input" type="number" min="0" step="50" placeholder="0" />
         </label>
-        <button id="save-token">Remember</button>
-      </div>
+        <button type="submit">Set</button>
+      </form>
       <p id="override-message"></p>
     </section>
   </main>

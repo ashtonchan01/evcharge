@@ -31,8 +31,8 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
   hysteresis (separate start/stop thresholds) and a stable-cycle counter
   so it doesn't flap when a cloud passes over.
 - **src/server/index.ts** — serves the dashboard, `GET /api/status`, and
-  `POST /api/enabled` (protected by an `x-override-token` header) to turn
-  solar charging on/off. Pushes live updates over WebSocket at `/ws`.
+  `POST /api/enabled` to turn solar charging on/off. Pushes live updates
+  over WebSocket at `/ws`.
 
 ## Setup
 
@@ -43,13 +43,11 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
      an OAuth refresh token (from the authorization-code exchange, scoped
      to at least `vehicle_device_data` and `vehicle_charging_cmds`), and
      your target vehicle's ID/VIN.
-   - An `OVERRIDE_TOKEN` (`openssl rand -hex 32`) to protect the on/off
-     and vehicle-lookup endpoints.
 3. `npm run dev` (or `npm run build && npm start`).
 4. Open `http://localhost:3000`.
-5. To find a vehicle's id/VIN, call `GET /api/vehicles` with an
-   `x-override-token` header once the server is running - it lists every
-   vehicle on the account.
+5. To find a vehicle's id/VIN, call `GET /api/vehicles` once the server
+   is running - it lists every vehicle on the account (also available as
+   a dropdown in the dashboard).
 
 ## Setting up the signed-command proxy (non-exempt vehicles)
 
@@ -88,26 +86,26 @@ All thresholds live in `.env`:
 
 - `MIN_SURPLUS_START_W` / `MIN_SURPLUS_STOP_W` — hysteresis band so surplus
   hovering near zero doesn't start/stop every cycle.
-- `GRID_IMPORT_BUFFER_W` — solar reserved for the house before offering
-  any to the car.
 - `STABLE_CYCLES_TO_START` / `STABLE_CYCLES_TO_STOP` — how many
   consecutive polls a condition must hold before acting.
 - `MIN_CHARGE_AMPS` / `MAX_CHARGE_AMPS` — Tesla's charge amp floor/ceiling
   for your charging equipment.
+
+The grid import buffer (solar reserved for the house before offering any
+to the car) isn't in `.env` - it's set live from the dashboard, starts at
+0W on boot, and calls `POST /api/buffer` with `{ "bufferW": <watts> }`.
 
 ## On/off toggle
 
 The dashboard has a single switch. On: the controller follows solar
 surplus automatically (the core behaviour described above). Off: the car
 is left alone (or told to stop charging if it was mid-session), regardless
-of solar. It calls `POST /api/enabled` with `{ "enabled": true | false }`
-and the `x-override-token` header.
+of solar. It calls `POST /api/enabled` with `{ "enabled": true | false }`.
 
 ## Multiple vehicles
 
 The dashboard's vehicle dropdown (populated from `GET /api/vehicles`) lets
 you switch which single vehicle the controller actively manages - it
 controls one car at a time, not both simultaneously. Selecting a vehicle
-calls `POST /api/vehicle` with `{ "tag": "<VIN>" }` and the
-`x-override-token` header, and resets the stability counters so the newly
-selected car is evaluated fresh.
+calls `POST /api/vehicle` with `{ "tag": "<VIN>" }`, and resets the
+stability counters so the newly selected car is evaluated fresh.

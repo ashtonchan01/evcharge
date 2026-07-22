@@ -11,6 +11,8 @@
 
 * { box-sizing: border-box; }
 
+form { margin: 0; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -21,7 +23,8 @@ body {
 main {
   max-width: 960px;
   margin: 0 auto;
-  padding: 24px 16px 64px;
+  padding: calc(24px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+    calc(64px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
 }
 
 header {
@@ -92,7 +95,7 @@ dd { margin: 0; font-weight: 600; text-align: right; }
   letter-spacing: 0.05em;
 }
 
-.controls, .token-row {
+.controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -120,6 +123,7 @@ input {
   color: var(--text);
   padding: 6px 8px;
   width: 90px;
+  font-size: 16px; /* iOS Safari zooms on focus for inputs below 16px */
 }
 
 select {
@@ -129,6 +133,7 @@ select {
   color: var(--text);
   padding: 6px 8px;
   width: 100%;
+  font-size: 16px; /* iOS Safari zooms on focus for selects below 16px */
 }
 
 label {
@@ -176,3 +181,33 @@ label {
 #enabled-label { font-weight: 600; }
 
 #override-message { min-height: 1.2em; font-size: 0.9rem; }
+
+@media (max-width: 480px) {
+  main { padding-top: calc(16px + env(safe-area-inset-top)); }
+
+  h1 { font-size: 1.2rem; }
+
+  .cards { grid-template-columns: 1fr; }
+
+  .card, .override { padding: 14px 16px; }
+
+  button {
+    padding: 11px 16px;
+    font-size: 1rem;
+    min-height: 44px;
+  }
+
+  .switch {
+    width: 54px;
+    height: 32px;
+  }
+
+  .switch .slider::before {
+    width: 26px;
+    height: 26px;
+  }
+
+  .switch input:checked + .slider::before { transform: translateX(22px); }
+
+  select { min-height: 44px; }
+}

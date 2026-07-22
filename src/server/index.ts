@@ -11,19 +11,6 @@ import { logger } from "../util/logger.js";
 const log = logger.child({ module: "server" });
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function requireOverrideToken(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
-): void {
-  const token = req.header("x-override-token");
-  if (token !== config.overrideToken) {
-    res.status(401).json({ error: "Invalid or missing x-override-token header" });
-    return;
-  }
-  next();
-}
-
 export function createApp(controller: ChargeController, tesla: TeslaFleetClient) {
   const app = express();
   app.use(express.json());
@@ -33,7 +20,7 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient)
     res.json(controller.getStatus());
   });
 
-  app.get("/api/vehicles", requireOverrideToken, async (_req, res) => {
+  app.get("/api/vehicles", async (_req, res) => {
     try {
       res.json(await tesla.listVehicles());
     } catch (err) {
@@ -41,7 +28,7 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient)
     }
   });
 
-  app.post("/api/enabled", requireOverrideToken, (req, res) => {
+  app.post("/api/enabled", (req, res) => {
     const { enabled } = req.body as { enabled?: boolean };
 
     if (typeof enabled !== "boolean") {
@@ -53,7 +40,19 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient)
     res.json(controller.getStatus());
   });
 
-  app.post("/api/vehicle", requireOverrideToken, (req, res) => {
+  app.post("/api/buffer", (req, res) => {
+    const { bufferW } = req.body as { bufferW?: number };
+
+    if (typeof bufferW !== "number" || !Number.isFinite(bufferW) || bufferW < 0) {
+      res.status(400).json({ error: "bufferW must be a non-negative number" });
+      return;
+    }
+
+    controller.setGridImportBufferW(bufferW, req.header("x-actor") ?? "dashboard");
+    res.json(controller.getStatus());
+  });
+
+  app.post("/api/vehicle", (req, res) => {
     const { tag } = req.body as { tag?: string };
 
     if (typeof tag !== "string" || !tag.trim()) {
