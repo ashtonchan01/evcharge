@@ -4,45 +4,94 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Solar EV Charging</title>
+
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/icons/icon-16.png" />
+  <link rel="apple-touch-icon" href="/icons/icon-180.png" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="EVCharge" />
+  <meta name="mobile-web-app-capable" content="yes" />
+
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <div class="bg-fx" aria-hidden="true">
+    <div class="bg-glow bg-glow-cyan"></div>
+    <div class="bg-glow bg-glow-amber"></div>
+    <div class="bg-grid"></div>
+  </div>
+
   <main>
-    <header>
-      <h1>☀️ Solar EV Charging</h1>
-      <span id="conn-indicator" class="dot dot-off" title="connection status"></span>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icons/icon-96.png" width="40" height="40" alt="" class="brand-icon" />
+        <div class="brand-text">
+          <h1>Solar EV Charging</h1>
+          <p class="subtitle">Live control</p>
+        </div>
+      </div>
+      <div class="conn">
+        <span id="conn-indicator" class="dot dot-off"></span>
+        <span id="conn-label" class="conn-label">Connecting…</span>
+      </div>
     </header>
 
+    <section class="flow" aria-label="Power flow">
+      <div class="flow-node">
+        <div class="flow-icon flow-icon-sun">☀</div>
+        <div class="flow-value" id="pv">–</div>
+        <div class="flow-label">Solar</div>
+      </div>
+      <div class="flow-line" id="line-solar"><i></i></div>
+      <div class="flow-node">
+        <div class="flow-icon flow-icon-house">⌂</div>
+        <div class="flow-value" id="load">–</div>
+        <div class="flow-label">Household</div>
+      </div>
+      <div class="flow-line" id="line-surplus"><i></i></div>
+      <div class="flow-node flow-node-ev">
+        <div class="flow-icon flow-icon-bolt">⚡</div>
+        <div class="flow-value" id="surplus">–</div>
+        <div class="flow-label">To EV</div>
+      </div>
+    </section>
+
     <section class="cards">
-      <div class="card">
+      <div class="card card-accent-cyan">
         <h2>Solar</h2>
         <dl>
-          <dt>PV production</dt><dd id="pv">–</dd>
-          <dt>Household load</dt><dd id="load">–</dd>
+          <dt>PV production</dt><dd id="pv-2">–</dd>
+          <dt>Household load</dt><dd id="load-2">–</dd>
           <dt>Grid</dt><dd id="grid">–</dd>
-          <dt>Surplus for EV</dt><dd id="surplus">–</dd>
+          <dt>Surplus for EV</dt><dd id="surplus-2">–</dd>
         </dl>
       </div>
 
-      <div class="card">
+      <div class="card card-accent-amber">
         <h2>Vehicle</h2>
-        <div class="controls" style="margin-bottom: 12px;">
+        <div class="controls" style="margin-bottom: 14px;">
           <select id="vehicle-select">
             <option value="">Select vehicle…</option>
           </select>
         </div>
+        <div class="battery-gauge">
+          <div class="battery-gauge-fill" id="battery-fill"></div>
+          <span class="battery-gauge-label" id="battery-label">–</span>
+        </div>
         <dl>
           <dt>Plugged in</dt><dd id="plugged">–</dd>
           <dt>Charging state</dt><dd id="charging-state">–</dd>
-          <dt>Battery</dt><dd id="battery">–</dd>
           <dt>Charge amps</dt><dd id="amps">–</dd>
         </dl>
       </div>
 
-      <div class="card">
+      <div class="card card-accent-violet">
         <h2>Controller</h2>
+        <p class="decision-pill" id="decision">–</p>
         <dl>
-          <dt>Decision</dt><dd id="decision">–</dd>
           <dt>Target amps</dt><dd id="target-amps">–</dd>
           <dt>Last poll</dt><dd id="last-poll">–</dd>
         </dl>
@@ -50,7 +99,7 @@
       </div>
     </section>
 
-    <section class="override">
+    <section class="override glass">
       <h2>Solar charging</h2>
       <div class="controls">
         <label class="switch">
@@ -59,12 +108,15 @@
         </label>
         <span id="enabled-label">On</span>
       </div>
-      <form id="buffer-form" class="controls">
-        <label>
-          Grid import buffer (W)
+
+      <form id="buffer-form" class="buffer-row">
+        <label for="buffer-range">Grid import buffer</label>
+        <div class="buffer-controls">
+          <input id="buffer-range" type="range" min="0" max="3000" step="50" value="0" />
           <input id="buffer-input" type="number" min="0" step="50" placeholder="0" />
-        </label>
-        <button type="submit">Set</button>
+          <span class="buffer-unit">W</span>
+          <button type="submit">Set</button>
+        </div>
       </form>
       <p id="override-message"></p>
     </section>

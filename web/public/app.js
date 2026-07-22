@@ -19,26 +19,47 @@ function flash(id, msg) {
   }, 4000);
 }
 
+function setText(id, text) {
+  const el = $(id);
+  if (el) el.textContent = text;
+}
+
 function render(status) {
   const s = status.solar;
-  $("pv").textContent = s ? fmtW(s.pvPowerW) : "–";
-  $("load").textContent = s ? fmtW(s.loadPowerW) : "–";
-  $("grid").textContent = s ? fmtW(s.gridPowerW) : "–";
-  $("surplus").textContent = fmtW(status.surplusW);
+  const pv = s ? s.pvPowerW : null;
+  const load = s ? s.loadPowerW : null;
+
+  setText("pv", fmtW(pv));
+  setText("pv-2", fmtW(pv));
+  setText("load", fmtW(load));
+  setText("load-2", fmtW(load));
+  setText("grid", s ? fmtW(s.gridPowerW) : "–");
+  setText("surplus", fmtW(status.surplusW));
+  setText("surplus-2", fmtW(status.surplusW));
+
+  $("line-solar").classList.toggle("active", (pv || 0) > 50);
+  $("line-surplus").classList.toggle("active", (status.surplusW || 0) > 50);
 
   const v = status.vehicle;
-  $("plugged").textContent = v ? (v.pluggedIn ? "Yes" : "No") : "unknown";
-  $("charging-state").textContent = v ? v.chargingState : "unknown";
-  $("battery").textContent = v ? `${v.batteryLevel}%` : "–";
-  $("amps").textContent = v ? `${v.chargeAmps} A` : "–";
+  setText("plugged", v ? (v.pluggedIn ? "Yes" : "No") : "unknown");
+  setText("charging-state", v ? v.chargingState : "unknown");
+  setText("amps", v ? `${v.chargeAmps} A` : "–");
 
-  $("decision").textContent = status.decision.replace(/_/g, " ");
-  $("target-amps").textContent = status.targetAmps !== null ? `${status.targetAmps} A` : "–";
-  $("last-poll").textContent = fmtTime(status.lastPollAt);
-  $("last-error").textContent = status.lastError || "";
+  const batteryLevel = v ? v.batteryLevel : null;
+  const fill = $("battery-fill");
+  fill.style.width = batteryLevel !== null && batteryLevel !== undefined ? `${batteryLevel}%` : "0%";
+  setText("battery-label", batteryLevel !== null && batteryLevel !== undefined ? `${batteryLevel}%` : "–");
+
+  const decisionEl = $("decision");
+  decisionEl.textContent = status.decision.replace(/_/g, " ");
+  decisionEl.className = `decision-pill ${status.decision}`;
+
+  setText("target-amps", status.targetAmps !== null ? `${status.targetAmps} A` : "–");
+  setText("last-poll", fmtTime(status.lastPollAt));
+  setText("last-error", status.lastError || "");
 
   $("enabled-toggle").checked = status.override.enabled;
-  $("enabled-label").textContent = status.override.enabled ? "On" : "Off";
+  setText("enabled-label", status.override.enabled ? "On" : "Off");
 
   const select = $("vehicle-select");
   if (status.vehicleTag && [...select.options].some((o) => o.value === status.vehicleTag)) {
@@ -46,8 +67,10 @@ function render(status) {
   }
 
   const bufferInput = $("buffer-input");
-  if (document.activeElement !== bufferInput) {
+  const bufferRange = $("buffer-range");
+  if (document.activeElement !== bufferInput && document.activeElement !== bufferRange) {
     bufferInput.value = status.gridImportBufferW || "";
+    bufferRange.value = status.gridImportBufferW || 0;
   }
 }
 
@@ -113,6 +136,14 @@ $("enabled-toggle").addEventListener("change", async (e) => {
   flash("override-message", enabled ? "Solar charging turned on." : "Solar charging turned off.");
 });
 
+$("buffer-range").addEventListener("input", (e) => {
+  $("buffer-input").value = e.target.value;
+});
+
+$("buffer-input").addEventListener("input", (e) => {
+  if (e.target.value !== "") $("buffer-range").value = e.target.value;
+});
+
 $("buffer-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const raw = $("buffer-input").value;
@@ -146,11 +177,13 @@ function connectWs() {
   ws.addEventListener("open", () => {
     $("conn-indicator").classList.remove("dot-off");
     $("conn-indicator").classList.add("dot-on");
+    setText("conn-label", "Live");
   });
 
   ws.addEventListener("close", () => {
     $("conn-indicator").classList.remove("dot-on");
     $("conn-indicator").classList.add("dot-off");
+    setText("conn-label", "Reconnecting…");
     setTimeout(connectWs, 2000);
   });
 
