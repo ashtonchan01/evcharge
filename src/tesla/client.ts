@@ -1,4 +1,5 @@
 import fetch from "cross-fetch";
+import https from "node:https";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
 
@@ -45,24 +46,32 @@ export interface VehicleSummary {
 }
 
 /**
- * Calls Tesla's Fleet API directly. This is only safe for vehicles that
- * don't require the signed "vehicle command protocol" (pre-2021 cars on
- * older infotainment firmware) - those vehicles accept plain OAuth-token
- * authenticated commands with no virtual key pairing. Newer vehicles
- * require routing through a signed-command proxy instead.
+ * Calls Tesla's Fleet API directly for reads (vehicle_data, wake_up,
+ * listing vehicles), which works for any vehicle. Commands (start/stop
+ * charging, set amps) route through a local `tesla-http-proxy` instead
+ * when TESLA_COMMAND_PROXY_URL is set - required for any vehicle except
+ * pre-2021 Model S/X, which are exempt from Tesla's signed "vehicle
+ * command protocol."
  */
 export class TeslaFleetClient {
   private accessToken: string | null = null;
   private readonly baseUrl: string;
+  private readonly commandProxyUrl: string | null;
+  // The proxy serves a self-signed cert we generated ourselves for this
+  // local loopback connection - trusting it here is scoped to just these
+  // requests, not a global TLS bypass.
+  private readonly proxyAgent = new https.Agent({ rejectUnauthorized: false });
 
   constructor(
     baseUrl: string,
     private readonly clientId: string,
     private readonly clientSecret: string,
     private readonly refreshToken: string,
-    private readonly vehicleTag: string
+    private readonly vehicleTag: string,
+    commandProxyUrl?: string
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.commandProxyUrl = commandProxyUrl ? commandProxyUrl.replace(/\/+$/, "") : null;
   }
 
   private async refreshAccessToken(): Promise<string> {
@@ -92,13 +101,20 @@ export class TeslaFleetClient {
     return this.accessToken;
   }
 
-  private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+    opts?: { baseUrl?: string; agent?: https.Agent }
+  ): Promise<T> {
     if (!this.accessToken) {
       await this.refreshAccessToken();
     }
 
+    const targetBaseUrl = opts?.baseUrl ?? this.baseUrl;
+
     const doRequest = async (token: string) =>
-      fetchWithTimeout(`${this.baseUrl}${path}`, {
+      fetchWithTimeout(`${targetBaseUrl}${path}`, {
         method,
         headers: {
           "Content-Type": "application/json",
@@ -107,6 +123,7 @@ export class TeslaFleetClient {
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         },
         body: body ? JSON.stringify(body) : undefined,
+        agent: opts?.agent,
       });
 
     let res = await doRequest(this.accessToken!);
@@ -131,11 +148,14 @@ export class TeslaFleetClient {
   }
 
   private command(name: string, body?: unknown) {
-    return this.request(
-      "POST",
-      `/api/1/vehicles/${this.vehicleTag}/command/${name}`,
-      body ?? {}
-    );
+    const path = `/api/1/vehicles/${this.vehicleTag}/command/${name}`;
+    if (this.commandProxyUrl) {
+      return this.request("POST", path, body ?? {}, {
+        baseUrl: this.commandProxyUrl,
+        agent: this.proxyAgent,
+      });
+    }
+    return this.request("POST", path, body ?? {});
   }
 
   async listVehicles(): Promise<VehicleSummary[]> {
@@ -198,6 +218,7 @@ export function createTeslaClient(): TeslaFleetClient {
     config.tesla.clientId,
     config.tesla.clientSecret,
     config.tesla.refreshToken,
-    config.tesla.vehicleTag
+    config.tesla.vehicleTag,
+    config.tesla.commandProxyUrl
   );
 }

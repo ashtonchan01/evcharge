@@ -16,13 +16,13 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
 
 - **src/goodwe/client.ts** — logs into the SEMS cloud portal and reads PV
   production, household load, and grid import/export.
-- **src/tesla/client.ts** — calls Tesla's Fleet API directly using an
-  OAuth refresh token (auto-refreshing short-lived access tokens as
-  needed). This only works for vehicles that don't require Tesla's signed
-  "vehicle command protocol" virtual-key pairing - roughly pre-2021 cars
-  on older infotainment firmware. Newer vehicles would need commands
-  routed through a signed-command proxy (e.g. Tesla's open-source
-  `tesla-http-proxy`) instead.
+- **src/tesla/client.ts** — calls Tesla's Fleet API directly using an OAuth
+  refresh token (auto-refreshing short-lived access tokens as needed) for
+  reads (charge state, wake-up, listing vehicles) - these work for any
+  vehicle. Commands (start/stop charging, set amps) route through a local
+  `tesla-http-proxy` instead when `TESLA_COMMAND_PROXY_URL` is set, since
+  Tesla requires its signed "vehicle command protocol" for commands on
+  every vehicle except pre-2021 Model S/X.
 - **src/controller/index.ts** — every `POLL_INTERVAL_MS`, computes
   `surplus = pvPower - householdLoad - buffer`, converts it to an amp
   target, and starts/stops/adjusts the car's charge rate. Uses
@@ -48,6 +48,37 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
 5. To find a vehicle's id/VIN, call `GET /api/vehicles` with an
    `x-override-token` header once the server is running - it lists every
    vehicle on the account.
+
+## Setting up the signed-command proxy (non-exempt vehicles)
+
+Only needed if your target vehicle isn't a pre-2021 Model S/X - you'll
+know because commands fail with "Tesla Vehicle Command Protocol required."
+
+1. Clone and build Tesla's proxy: `git clone https://github.com/teslamotors/vehicle-command.git && cd vehicle-command && go build ./cmd/tesla-http-proxy && go build ./cmd/tesla-keygen`
+2. Generate a key pair: `./tesla-keygen -key-file private-key.pem -output public-key.pem create`
+3. Host `public-key.pem`'s contents at
+   `https://yourdomain/.well-known/appspecific/com.tesla.3p.public-key.pem`
+   (a free GitHub Pages **user** site - a repo named exactly
+   `yourusername.github.io` - works; make sure to add an empty `.nojekyll`
+   file at the repo root or Jekyll will silently exclude the dotfile
+   path). This domain must match what you registered as your developer
+   app's Allowed Origin/Redirect URLs.
+4. Register your app with Tesla's Fleet API for your region (one-time, using
+   an app-level `client_credentials` token, not your personal login):
+   ```
+   curl -s -X POST https://auth.tesla.com/oauth2/v3/token -d "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET&scope=vehicle_device_data%20vehicle_cmds%20vehicle_charging_cmds&audience=YOUR_FLEET_API_BASE_URL" > app_token.json
+   curl -s -X POST YOUR_FLEET_API_BASE_URL/api/1/partner_accounts -H "Authorization: Bearer $(python3 -c "import json;print(json.load(open('app_token.json'))['access_token'])")" -H "Content-Type: application/json" -d '{"domain":"yourdomain"}'
+   ```
+5. Pair the virtual key: on your phone, visit `https://tesla.com/_ak/yourdomain`
+   and approve it for the specific vehicle that needs it.
+6. Generate a local TLS cert for the proxy (LibreSSL/macOS-safe method):
+   ```
+   openssl ecparam -genkey -name prime256v1 -noout -out server-key.pem
+   openssl req -new -x509 -key server-key.pem -out server-cert.pem -days 365 -subj "/CN=localhost"
+   ```
+7. Run the proxy: `./tesla-http-proxy -tls-key server-key.pem -cert server-cert.pem -key-file private-key.pem -port 4443`
+8. Set `TESLA_COMMAND_PROXY_URL=https://localhost:4443` in `.env` and keep
+   the proxy running alongside this app.
 
 ## Tuning
 

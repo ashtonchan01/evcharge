@@ -33,6 +33,11 @@ const schema = z.object({
   TESLA_CLIENT_SECRET: z.string().min(1),
   TESLA_REFRESH_TOKEN: z.string().min(1),
   TESLA_VEHICLE_TAG: z.string().min(1),
+  // Optional: local tesla-http-proxy URL for vehicles that require Tesla's
+  // signed Vehicle Command Protocol (anything except pre-2021 Model S/X).
+  // When set, command calls (start/stop charging, set amps) route through
+  // it instead of hitting the Fleet API directly; reads still go direct.
+  TESLA_COMMAND_PROXY_URL: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -74,5 +79,6 @@ export const config = {
     clientSecret: env.TESLA_CLIENT_SECRET,
     refreshToken: env.TESLA_REFRESH_TOKEN,
     vehicleTag: env.TESLA_VEHICLE_TAG,
+    commandProxyUrl: env.TESLA_COMMAND_PROXY_URL || undefined,
   },
 };
