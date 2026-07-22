@@ -170,8 +170,10 @@ export class GoodweSemsClient {
 
   /**
    * Fetch the latest real-time power figures for the configured power
-   * station. Falls back gracefully across the couple of shapes the SEMS
-   * portal is known to return depending on inverter generation.
+   * station. The `data.powerflow` block is the authoritative real-time
+   * source - `data.kpi` only carries PV output (already in watts, despite
+   * the field name) plus lifetime/daily energy totals, with no load or
+   * grid figures at all.
    */
   async getSnapshot(): Promise<SolarSnapshot> {
     const body = await this.postWithAuth<{ data: Record<string, unknown> }>(
@@ -182,21 +184,24 @@ export class GoodweSemsClient {
     log.debug({ body }, "Raw SEMS monitor-detail response");
 
     const data = body.data ?? {};
-    const kpi = (data.kpi ?? {}) as Record<string, unknown>;
+    const powerflow = (data.powerflow ?? {}) as Record<string, unknown>;
+    const info = (data.info ?? {}) as Record<string, unknown>;
 
-    const pvKw = numberOrNull(kpi.pac) ?? numberOrNull(data.pac) ?? 0;
-    const loadKw = numberOrNull(kpi.load) ?? numberOrNull(data.loadPower) ?? 0;
-    const gridKw =
-      numberOrNull(kpi.grid) ?? numberOrNull(data.gridPower) ?? pvKw - loadKw;
-    const batteryKw = numberOrNull(kpi.battery) ?? numberOrNull(data.batteryPower) ?? 0;
-    const soc = numberOrNull((data.soc as Record<string, unknown> | undefined)?.power ?? data.soc);
+    const pvW = parseWatts(powerflow.pv) ?? 0;
+    const loadW = parseWatts(powerflow.load) ?? 0;
+    const batteryW = parseWatts(powerflow.bettery) ?? 0; // sic - GoodWe's own field name typo
+    // Positive = exporting: pv output not consumed by the house.
+    const gridW = pvW - loadW;
+
+    const hasBattery = Number(info.battery_capacity ?? 0) > 0;
+    const soc = hasBattery ? numberOrNull(powerflow.soc) : null;
 
     return {
       timestamp: new Date(),
-      pvPowerW: kwToW(pvKw),
-      loadPowerW: kwToW(loadKw),
-      gridPowerW: kwToW(gridKw),
-      batteryPowerW: kwToW(batteryKw),
+      pvPowerW: pvW,
+      loadPowerW: loadW,
+      gridPowerW: gridW,
+      batteryPowerW: batteryW,
       batterySoc: soc,
     };
   }
@@ -208,9 +213,11 @@ function numberOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// SEMS reports most kpi figures in kW; the rest of this app works in watts.
-function kwToW(kw: number): number {
-  return Math.round(kw * 1000);
+// SEMS reports powerflow figures as strings like "2690(W)".
+function parseWatts(v: unknown): number | null {
+  if (typeof v !== "string") return numberOrNull(v);
+  const match = v.match(/-?\d+(\.\d+)?/);
+  return match ? Number(match[0]) : null;
 }
 
 export function createGoodweClient(): GoodweSemsClient {
