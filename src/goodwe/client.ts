@@ -1,4 +1,5 @@
 import fetch from "cross-fetch";
+import { createHash } from "node:crypto";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
 
@@ -86,7 +87,10 @@ export class GoodweSemsClient {
           language: "en",
         }),
       },
-      body: JSON.stringify({ account: this.account, pwd: this.password }),
+      body: JSON.stringify({
+        account: this.account,
+        pwd: createHash("md5").update(this.password).digest("hex"),
+      }),
     });
 
     if (!res.ok) {
