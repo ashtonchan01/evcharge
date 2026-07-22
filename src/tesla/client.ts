@@ -9,11 +9,20 @@ const REQUEST_TIMEOUT_MS = 20_000;
 
 async function fetchWithTimeout(url: string, init: Record<string, unknown>): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const abortTimer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let raceTimer: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    raceTimer = setTimeout(
+      () => reject(new Error(`Request to ${url} timed out after ${REQUEST_TIMEOUT_MS}ms`)),
+      REQUEST_TIMEOUT_MS
+    );
+  });
+
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await Promise.race([fetch(url, { ...init, signal: controller.signal }), timeoutPromise]);
   } finally {
-    clearTimeout(timer);
+    clearTimeout(abortTimer);
+    clearTimeout(raceTimer!);
   }
 }
 
