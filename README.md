@@ -29,9 +29,8 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
   hysteresis (separate start/stop thresholds) and a stable-cycle counter
   so it doesn't flap when a cloud passes over.
 - **src/server/index.ts** — serves the dashboard, `GET /api/status`, and
-  `POST /api/override` (protected by an `x-override-token` header) for
-  manual auto/force-on/force-off control. Pushes live updates over
-  WebSocket at `/ws`.
+  `POST /api/enabled` (protected by an `x-override-token` header) to turn
+  solar charging on/off. Pushes live updates over WebSocket at `/ws`.
 
 ## Setup
 
@@ -42,8 +41,8 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
      an OAuth refresh token (from the authorization-code exchange, scoped
      to at least `vehicle_device_data` and `vehicle_charging_cmds`), and
      your target vehicle's ID/VIN.
-   - An `OVERRIDE_TOKEN` (`openssl rand -hex 32`) to protect the manual
-     override and vehicle-lookup endpoints.
+   - An `OVERRIDE_TOKEN` (`openssl rand -hex 32`) to protect the on/off
+     and vehicle-lookup endpoints.
 3. `npm run dev` (or `npm run build && npm start`).
 4. Open `http://localhost:3000`.
 5. To find a vehicle's id/VIN, call `GET /api/vehicles` with an
@@ -63,10 +62,10 @@ All thresholds live in `.env`:
 - `MIN_CHARGE_AMPS` / `MAX_CHARGE_AMPS` — Tesla's charge amp floor/ceiling
   for your charging equipment.
 
-## Manual override
+## On/off toggle
 
-The dashboard's override panel calls `POST /api/override` with
-`{ "mode": "auto" | "force_on" | "force_off", "amps": <optional number> }`
-and the `x-override-token` header. `force_on` without `amps` charges at
-`MAX_CHARGE_AMPS`. Switching back to `auto` resumes solar-following on the
-next poll.
+The dashboard has a single switch. On: the controller follows solar
+surplus automatically (the core behaviour described above). Off: the car
+is left alone (or told to stop charging if it was mid-session), regardless
+of solar. It calls `POST /api/enabled` with `{ "enabled": true | false }`
+and the `x-override-token` header.

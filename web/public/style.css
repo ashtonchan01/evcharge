@@ -130,4 +130,40 @@ label {
   color: var(--muted);
 }
 
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 46px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.switch input { opacity: 0; width: 0; height: 0; }
+
+.slider {
+  position: absolute;
+  inset: 0;
+  background: #34394a;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.slider::before {
+  content: "";
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  left: 3px;
+  top: 3px;
+  background: var(--text);
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+
+.switch input:checked + .slider { background: var(--good); }
+.switch input:checked + .slider::before { transform: translateX(20px); }
+
+#enabled-label { font-weight: 600; }
+
 #override-message { min-height: 1.2em; font-size: 0.9rem; }

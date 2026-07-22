@@ -39,7 +39,6 @@
         <dl>
           <dt>Decision</dt><dd id="decision">–</dd>
           <dt>Target amps</dt><dd id="target-amps">–</dd>
-          <dt>Mode</dt><dd id="mode">–</dd>
           <dt>Last poll</dt><dd id="last-poll">–</dd>
         </dl>
         <p id="last-error" class="error"></p>
@@ -47,15 +46,13 @@
     </section>
 
     <section class="override">
-      <h2>Manual override</h2>
+      <h2>Solar charging</h2>
       <div class="controls">
-        <button data-mode="auto">Auto (solar-following)</button>
-        <button data-mode="force_on">Force charge on</button>
-        <button data-mode="force_off">Force charge off</button>
-        <label>
-          Amps (force on only)
-          <input id="amps-input" type="number" min="0" max="48" placeholder="max" />
+        <label class="switch">
+          <input type="checkbox" id="enabled-toggle" />
+          <span class="slider"></span>
         </label>
+        <span id="enabled-label">On</span>
       </div>
       <div class="token-row">
         <label>

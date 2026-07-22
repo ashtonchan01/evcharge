@@ -6,12 +6,9 @@ import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "controller" });
 
-export type OverrideMode = "auto" | "force_on" | "force_off";
-
 export interface OverrideState {
-  mode: OverrideMode;
-  /** Only used for force_on; null means "use max amps" */
-  amps: number | null;
+  /** false = fully off, ignore solar. true = automatic solar-following. */
+  enabled: boolean;
   setAt: Date | null;
   setBy: string | null;
 }
@@ -29,8 +26,8 @@ export interface ControllerStatus {
 
 /**
  * Core control loop: poll solar production/consumption, poll the vehicle,
- * decide whether there's enough spare solar to charge from, and issue
- * amp/start/stop commands to the car - unless a manual override is active.
+ * and decide whether there's enough spare solar to charge from - unless
+ * turned off, in which case it stays idle regardless of solar.
  */
 export class ChargeController extends EventEmitter {
   private status: ControllerStatus = {
@@ -39,7 +36,7 @@ export class ChargeController extends EventEmitter {
     surplusW: null,
     targetAmps: null,
     decision: "unavailable",
-    override: { mode: "auto", amps: null, setAt: null, setBy: null },
+    override: { enabled: true, setAt: null, setBy: null },
     lastError: null,
     lastPollAt: null,
   };
@@ -72,10 +69,9 @@ export class ChargeController extends EventEmitter {
     this.timer = null;
   }
 
-  setOverride(mode: OverrideMode, amps: number | null, setBy: string): void {
-    this.status.override = { mode, amps, setAt: new Date(), setBy };
-    log.info({ mode, amps, setBy }, "Manual override changed");
-    // Reset stability counters so returning to auto re-evaluates cleanly.
+  setEnabled(enabled: boolean, setBy: string): void {
+    this.status.override = { enabled, setAt: new Date(), setBy };
+    log.info({ enabled, setBy }, "Enabled state changed");
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
     this.emitUpdate();
@@ -115,9 +111,7 @@ export class ChargeController extends EventEmitter {
   }
 
   private async decide(surplusW: number, vehicle: VehicleChargeState | null): Promise<void> {
-    const { override } = this.status;
-
-    if (override.mode === "force_off") {
+    if (!this.status.override.enabled) {
       this.status.decision = "idle";
       this.status.targetAmps = null;
       if (this.isCurrentlyCharging) {
@@ -127,15 +121,6 @@ export class ChargeController extends EventEmitter {
       return;
     }
 
-    if (override.mode === "force_on") {
-      const amps = override.amps ?? config.maxChargeAmps;
-      this.status.decision = "charging";
-      this.status.targetAmps = amps;
-      await this.applyCharge(amps, vehicle);
-      return;
-    }
-
-    // --- auto mode ---
     if (!vehicle) {
       this.status.decision = "unavailable";
       return;

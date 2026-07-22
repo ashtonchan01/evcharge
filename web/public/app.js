@@ -41,13 +41,11 @@ function render(status) {
 
   $("decision").textContent = status.decision.replace(/_/g, " ");
   $("target-amps").textContent = status.targetAmps !== null ? `${status.targetAmps} A` : "–";
-  $("mode").textContent = status.override.mode.replace(/_/g, " ");
   $("last-poll").textContent = fmtTime(status.lastPollAt);
   $("last-error").textContent = status.lastError || "";
 
-  document
-    .querySelectorAll("[data-mode]")
-    .forEach((btn) => btn.classList.toggle("active", btn.dataset.mode === status.override.mode));
+  $("enabled-toggle").checked = status.override.enabled;
+  $("enabled-label").textContent = status.override.enabled ? "On" : "Off";
 }
 
 async function fetchStatus() {
@@ -55,27 +53,25 @@ async function fetchStatus() {
   render(await res.json());
 }
 
-document.querySelectorAll("[data-mode]").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const mode = btn.dataset.mode;
-    const amps = $("amps-input").value ? Number($("amps-input").value) : undefined;
-    const token = localStorage.getItem(tokenKey) || "";
+$("enabled-toggle").addEventListener("change", async (e) => {
+  const enabled = e.target.checked;
+  const token = localStorage.getItem(tokenKey) || "";
 
-    const res = await fetch("/api/override", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-override-token": token },
-      body: JSON.stringify({ mode, amps }),
-    });
-
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      flash("override-message", `Error: ${body.error || res.status}`);
-      return;
-    }
-
-    render(await res.json());
-    flash("override-message", `Mode set to ${mode}.`);
+  const res = await fetch("/api/enabled", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-override-token": token },
+    body: JSON.stringify({ enabled }),
   });
+
+  if (!res.ok) {
+    e.target.checked = !enabled;
+    const body = await res.json().catch(() => ({}));
+    flash("override-message", `Error: ${body.error || res.status}`);
+    return;
+  }
+
+  render(await res.json());
+  flash("override-message", enabled ? "Solar charging turned on." : "Solar charging turned off.");
 });
 
 function connectWs() {

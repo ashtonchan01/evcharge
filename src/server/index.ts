@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
-import { ChargeController, OverrideMode } from "../controller/index.js";
+import { ChargeController } from "../controller/index.js";
 import { TeslaFleetClient } from "../tesla/client.js";
 import { logger } from "../util/logger.js";
 
@@ -41,20 +41,15 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient)
     }
   });
 
-  app.post("/api/override", requireOverrideToken, (req, res) => {
-    const { mode, amps } = req.body as { mode?: string; amps?: number };
+  app.post("/api/enabled", requireOverrideToken, (req, res) => {
+    const { enabled } = req.body as { enabled?: boolean };
 
-    if (mode !== "auto" && mode !== "force_on" && mode !== "force_off") {
-      res.status(400).json({ error: "mode must be one of auto | force_on | force_off" });
+    if (typeof enabled !== "boolean") {
+      res.status(400).json({ error: "enabled must be a boolean" });
       return;
     }
 
-    if (amps !== undefined && (typeof amps !== "number" || amps < 0 || amps > 48)) {
-      res.status(400).json({ error: "amps must be a number between 0 and 48" });
-      return;
-    }
-
-    controller.setOverride(mode as OverrideMode, amps ?? null, req.header("x-actor") ?? "dashboard");
+    controller.setEnabled(enabled, req.header("x-actor") ?? "dashboard");
     res.json(controller.getStatus());
   });
 
