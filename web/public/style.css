@@ -122,6 +122,15 @@ input {
   width: 90px;
 }
 
+select {
+  background: #12141a;
+  border: 1px solid #34394a;
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  width: 100%;
+}
+
 label {
   display: flex;
   flex-direction: column;

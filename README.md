@@ -19,10 +19,12 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
 - **src/tesla/client.ts** — calls Tesla's Fleet API directly using an OAuth
   refresh token (auto-refreshing short-lived access tokens as needed) for
   reads (charge state, wake-up, listing vehicles) - these work for any
-  vehicle. Commands (start/stop charging, set amps) route through a local
-  `tesla-http-proxy` instead when `TESLA_COMMAND_PROXY_URL` is set, since
-  Tesla requires its signed "vehicle command protocol" for commands on
-  every vehicle except pre-2021 Model S/X.
+  vehicle. Commands (start/stop charging, set amps) are tried directly
+  first, then automatically retried through a local `tesla-http-proxy`
+  (when `TESLA_COMMAND_PROXY_URL` is set) if Tesla rejects them as
+  requiring its signed "vehicle command protocol" - every vehicle except
+  pre-2021 Model S/X. This means the same app instance works with either
+  kind of vehicle without configuration per car.
 - **src/controller/index.ts** — every `POLL_INTERVAL_MS`, computes
   `surplus = pvPower - householdLoad - buffer`, converts it to an amp
   target, and starts/stops/adjusts the car's charge rate. Uses
@@ -100,3 +102,12 @@ surplus automatically (the core behaviour described above). Off: the car
 is left alone (or told to stop charging if it was mid-session), regardless
 of solar. It calls `POST /api/enabled` with `{ "enabled": true | false }`
 and the `x-override-token` header.
+
+## Multiple vehicles
+
+The dashboard's vehicle dropdown (populated from `GET /api/vehicles`) lets
+you switch which single vehicle the controller actively manages - it
+controls one car at a time, not both simultaneously. Selecting a vehicle
+calls `POST /api/vehicle` with `{ "tag": "<VIN>" }` and the
+`x-override-token` header, and resets the stability counters so the newly
+selected car is evaluated fresh.

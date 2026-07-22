@@ -48,10 +48,12 @@ export interface VehicleSummary {
 /**
  * Calls Tesla's Fleet API directly for reads (vehicle_data, wake_up,
  * listing vehicles), which works for any vehicle. Commands (start/stop
- * charging, set amps) route through a local `tesla-http-proxy` instead
- * when TESLA_COMMAND_PROXY_URL is set - required for any vehicle except
- * pre-2021 Model S/X, which are exempt from Tesla's signed "vehicle
- * command protocol."
+ * charging, set amps) are tried directly first, then automatically
+ * retried through a local `tesla-http-proxy` (when TESLA_COMMAND_PROXY_URL
+ * is set) if Tesla rejects the direct call as requiring its signed
+ * "vehicle command protocol" - every vehicle except pre-2021 Model S/X.
+ * This lets the same client transparently support either kind of vehicle
+ * without needing to know in advance which one a given VIN is.
  */
 export class TeslaFleetClient {
   private accessToken: string | null = null;
@@ -67,11 +69,19 @@ export class TeslaFleetClient {
     private readonly clientId: string,
     private readonly clientSecret: string,
     private readonly refreshToken: string,
-    private readonly vehicleTag: string,
+    private vehicleTag: string,
     commandProxyUrl?: string
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.commandProxyUrl = commandProxyUrl ? commandProxyUrl.replace(/\/+$/, "") : null;
+  }
+
+  getVehicleTag(): string {
+    return this.vehicleTag;
+  }
+
+  setVehicleTag(tag: string): void {
+    this.vehicleTag = tag;
   }
 
   private async refreshAccessToken(): Promise<string> {
@@ -147,15 +157,22 @@ export class TeslaFleetClient {
     return parsed as T;
   }
 
-  private command(name: string, body?: unknown) {
+  private async command(name: string, body?: unknown): Promise<void> {
     const path = `/api/1/vehicles/${this.vehicleTag}/command/${name}`;
-    if (this.commandProxyUrl) {
-      return this.request("POST", path, body ?? {}, {
-        baseUrl: this.commandProxyUrl,
-        agent: this.proxyAgent,
-      });
+    try {
+      await this.request("POST", path, body ?? {});
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.commandProxyUrl && message.includes("Vehicle Command Protocol required")) {
+        log.info("Direct command rejected - retrying via signed-command proxy");
+        await this.request("POST", path, body ?? {}, {
+          baseUrl: this.commandProxyUrl,
+          agent: this.proxyAgent,
+        });
+        return;
+      }
+      throw err;
     }
-    return this.request("POST", path, body ?? {});
   }
 
   async listVehicles(): Promise<VehicleSummary[]> {

@@ -16,6 +16,7 @@ export interface OverrideState {
 export interface ControllerStatus {
   solar: SolarSnapshot | null;
   vehicle: VehicleChargeState | null;
+  vehicleTag: string;
   surplusW: number | null;
   targetAmps: number | null;
   decision: "charging" | "idle" | "waiting_for_stability" | "unavailable";
@@ -33,6 +34,7 @@ export class ChargeController extends EventEmitter {
   private status: ControllerStatus = {
     solar: null,
     vehicle: null,
+    vehicleTag: "",
     surplusW: null,
     targetAmps: null,
     decision: "unavailable",
@@ -51,6 +53,7 @@ export class ChargeController extends EventEmitter {
     private readonly tesla: TeslaFleetClient
   ) {
     super();
+    this.status.vehicleTag = tesla.getVehicleTag();
   }
 
   getStatus(): ControllerStatus {
@@ -72,6 +75,18 @@ export class ChargeController extends EventEmitter {
   setEnabled(enabled: boolean, setBy: string): void {
     this.status.override = { enabled, setAt: new Date(), setBy };
     log.info({ enabled, setBy }, "Enabled state changed");
+    this.aboveStartThresholdCount = 0;
+    this.belowStopThresholdCount = 0;
+    this.emitUpdate();
+  }
+
+  setVehicleTag(tag: string, setBy: string): void {
+    log.info({ tag, setBy }, "Switching active vehicle");
+    this.tesla.setVehicleTag(tag);
+    this.status.vehicleTag = tag;
+    this.status.vehicle = null;
+    this.status.decision = "unavailable";
+    this.isCurrentlyCharging = false;
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
     this.emitUpdate();

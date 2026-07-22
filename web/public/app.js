@@ -5,6 +5,7 @@ $("token-input").value = localStorage.getItem(tokenKey) || "";
 $("save-token").addEventListener("click", () => {
   localStorage.setItem(tokenKey, $("token-input").value);
   flash("override-message", "Token saved locally.");
+  loadVehicles();
 });
 
 function fmtW(w) {
@@ -46,12 +47,58 @@ function render(status) {
 
   $("enabled-toggle").checked = status.override.enabled;
   $("enabled-label").textContent = status.override.enabled ? "On" : "Off";
+
+  const select = $("vehicle-select");
+  if (status.vehicleTag && [...select.options].some((o) => o.value === status.vehicleTag)) {
+    select.value = status.vehicleTag;
+  }
 }
 
 async function fetchStatus() {
   const res = await fetch("/api/status");
   render(await res.json());
 }
+
+async function loadVehicles() {
+  const token = localStorage.getItem(tokenKey) || "";
+  if (!token) return;
+
+  const res = await fetch("/api/vehicles", { headers: { "x-override-token": token } });
+  if (!res.ok) return;
+
+  const vehicles = await res.json();
+  const select = $("vehicle-select");
+  const current = select.value;
+  select.innerHTML = '<option value="">Select vehicle…</option>';
+  for (const v of vehicles) {
+    const opt = document.createElement("option");
+    opt.value = v.vin;
+    opt.textContent = `${v.displayName || v.vin} (${v.state})`;
+    select.appendChild(opt);
+  }
+  if (current) select.value = current;
+}
+
+$("vehicle-select").addEventListener("change", async (e) => {
+  const tag = e.target.value;
+  if (!tag) return;
+  const token = localStorage.getItem(tokenKey) || "";
+
+  const res = await fetch("/api/vehicle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-override-token": token },
+    body: JSON.stringify({ tag }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    flash("override-message", `Error: ${body.error || res.status}`);
+    return;
+  }
+
+  render(await res.json());
+  flash("override-message", "Switched active vehicle.");
+});
 
 $("enabled-toggle").addEventListener("change", async (e) => {
   const enabled = e.target.checked;
@@ -96,4 +143,5 @@ function connectWs() {
 }
 
 fetchStatus();
+loadVehicles();
 connectWs();

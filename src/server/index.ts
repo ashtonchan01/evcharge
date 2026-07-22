@@ -53,6 +53,18 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient)
     res.json(controller.getStatus());
   });
 
+  app.post("/api/vehicle", requireOverrideToken, (req, res) => {
+    const { tag } = req.body as { tag?: string };
+
+    if (typeof tag !== "string" || !tag.trim()) {
+      res.status(400).json({ error: "tag must be a non-empty vehicle id or VIN" });
+      return;
+    }
+
+    controller.setVehicleTag(tag.trim(), req.header("x-actor") ?? "dashboard");
+    res.json(controller.getStatus());
+  });
+
   return app;
 }
 
