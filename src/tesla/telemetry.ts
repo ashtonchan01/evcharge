@@ -8,16 +8,25 @@ const log = logger.child({ module: "telemetry" });
 
 /**
  * Coarse, push-driven signal about a vehicle: is it plugged in, roughly
- * charging or not, and how stale is that signal. Deliberately does NOT
- * carry charger_actual_current/charger_voltage - the controller falls back
- * to an authoritative direct vehicle_data poll for that instead, but only
- * while a session is actually active - see src/controller/index.ts.
+ * charging or not, and how stale is that signal. Also carries the ramp
+ * loop's charging-power inputs (chargeAmps, chargerPowerW) so an active
+ * session can usually run on telemetry alone instead of polling
+ * vehicle_data every cycle - see src/controller/index.ts. These two are
+ * tracked with their own `chargingDataLastSeenAt` timestamp, separate from
+ * `lastSeenAt`, so the controller can judge specifically whether it has a
+ * *recent* charging-power reading (not just any recent field at all)
+ * before trusting telemetry over a direct poll during an active session.
  */
 export interface TelemetryHint {
   pluggedIn: boolean;
   chargingState: string; // normalized: "Charging" | "Complete" | "Disconnected" | "Stopped" | "Unknown"
   batteryLevel: number;
+  chargeAmps: number;
+  /** Real AC charging power in watts, converted from Tesla's ACChargingPower (kW). */
+  chargerPowerW: number;
+  chargeLimitSoc: number;
   lastSeenAt: Date;
+  chargingDataLastSeenAt: Date | null;
 }
 
 /**
@@ -119,13 +128,21 @@ export class TelemetryIngest extends EventEmitter {
     if (!parsed) return;
     const { vin, data } = parsed;
 
-    const hasRecognizedField =
-      "Soc" in data || "DetailedChargeState" in data || "ChargePortDoorOpen" in data;
+    const recognizedFields = [
+      "Soc",
+      "DetailedChargeState",
+      "ChargePortDoorOpen",
+      "ChargeAmps",
+      "ACChargingPower",
+      "ChargeLimitSoc",
+    ];
+    const hasRecognizedField = recognizedFields.some((f) => f in data);
     if (!hasRecognizedField) {
       this.unmatchedStreak += 1;
       if (this.unmatchedStreak === 20) {
         log.warn(
-          "20 consecutive vehicle-data telemetry lines had none of Soc/DetailedChargeState/ChargePortDoorOpen - fleet_telemetry_config's requested fields may not match what telemetry.ts looks for"
+          { recognizedFields },
+          "20 consecutive vehicle-data telemetry lines had none of the recognized fields - fleet_telemetry_config's requested fields may not match what telemetry.ts looks for"
         );
       }
       return;
@@ -136,6 +153,13 @@ export class TelemetryIngest extends EventEmitter {
     const detailedChargeState = data.DetailedChargeState;
     const chargePortDoorOpen = data.ChargePortDoorOpen;
     const soc = data.Soc;
+    const chargeAmps = data.ChargeAmps;
+    // Tesla's ACChargingPower is in kW (matches the REST API's charger_power
+    // field) - convert to watts to match the rest of the app's units.
+    const acChargingPowerKw = data.ACChargingPower;
+    const chargeLimitSoc = data.ChargeLimitSoc;
+    const now = new Date();
+    const hasChargingData = typeof chargeAmps === "number" || typeof acChargingPowerKw === "number";
 
     const hint: TelemetryHint = {
       chargingState:
@@ -144,7 +168,11 @@ export class TelemetryIngest extends EventEmitter {
           : prior?.chargingState ?? "Unknown",
       pluggedIn: typeof chargePortDoorOpen === "boolean" ? chargePortDoorOpen : prior?.pluggedIn ?? false,
       batteryLevel: typeof soc === "number" ? soc : prior?.batteryLevel ?? 0,
-      lastSeenAt: new Date(),
+      chargeAmps: typeof chargeAmps === "number" ? chargeAmps : prior?.chargeAmps ?? 0,
+      chargerPowerW: typeof acChargingPowerKw === "number" ? acChargingPowerKw * 1000 : prior?.chargerPowerW ?? 0,
+      chargeLimitSoc: typeof chargeLimitSoc === "number" ? chargeLimitSoc : prior?.chargeLimitSoc ?? 0,
+      lastSeenAt: now,
+      chargingDataLastSeenAt: hasChargingData ? now : prior?.chargingDataLastSeenAt ?? null,
     };
 
     this.byVin.set(vin, hint);

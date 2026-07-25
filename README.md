@@ -92,10 +92,12 @@ see [their Fleet Telemetry FAQ](https://chargehq.net/kb/tesla-fleet-telemetry-fa
 Fleet Telemetry flips the model: the car pushes state to a server you
 run, only when something changes, instead of you asking for it on a
 timer. This app uses telemetry as a free, always-on "is it plugged in /
-charging" signal, and only falls back to a real (billed) `vehicle_data`
-poll while a charge session is actually active, when precise
-charger_actual_current/voltage matters for the amp-ramp math - see the
-comments in `src/controller/index.ts` and `src/tesla/telemetry.ts`.
+charging / how many amps / how many watts" signal and can run the
+solar-following ramp loop entirely off it, including during an active
+charging session - it only falls back to a real (billed) `vehicle_data`
+poll when telemetry has no fresh reading yet (e.g. right after a session
+starts, before the first push arrives) - see the comments in
+`src/controller/index.ts` and `src/tesla/telemetry.ts`.
 
 You already have everything Fleet Telemetry needs if you set up the
 signed-command proxy above: a registered developer domain, a hosted
@@ -136,18 +138,37 @@ depends on it being sslip.io specifically.
    }
    ```
    `src/tesla/telemetry.ts`'s field names (`Soc`, `DetailedChargeState`,
-   `ChargePortDoorOpen`) and its parsing of the logger dispatcher's output
-   shape were both confirmed directly against a real
-   `teslamotors/fleet-telemetry` checkout (`protos/vehicle_data.proto` and
+   `ChargePortDoorOpen`, `ChargeAmps`, `ACChargingPower`, `ChargeLimitSoc`)
+   and its parsing of the logger dispatcher's output shape were both
+   confirmed directly against a real `teslamotors/fleet-telemetry` checkout
+   (`protos/vehicle_data.proto` and
    `datastore/simple/logger.go`/`transformers/payload.go`) - if a future
    version of that repo changes either, that's where to look first. Run
    the server under pm2 like `tesla-http-proxy`, and redirect its stdout
    to a file (pm2 does this automatically under `~/.pm2/logs/`).
-4. Push the streaming config to the vehicle (one-time, using the same
-   app-level `client_credentials` token from the proxy setup above):
+4. Push the streaming config to the vehicle (one-time). Two gotchas found
+   the hard way, both undocumented by Tesla's own error messages:
+   - This needs a **user-context OAuth token** (the same one used for
+     `vehicle_data`/commands), not the app-level `client_credentials` token
+     from the proxy setup above - using the app token returns a misleading
+     `"<VIN> not_found"` error that looks like a VIN/registration problem.
+   - As of mid-2026 this endpoint **must be called through the signed
+     Vehicle Command HTTP Proxy** (`tesla-http-proxy`, `TESLA_COMMAND_PROXY_URL`)
+     rather than Tesla's Fleet API directly - calling it directly now
+     returns `400 "This endpoint must be called through the Vehicle
+     Command HTTP Proxy"`. Since the proxy only binds to localhost, run
+     this `curl` from the same box the proxy runs on.
+   - Getting the user token itself (`grant_type=refresh_token` against
+     `auth.tesla.com/oauth2/v3/token`) can get blocked by Tesla's WAF from
+     a non-browser TLS fingerprint (Node's `fetch`, plain `curl`) even
+     though the same request works fine from a real browser. If you hit an
+     `Access Denied` HTML response instead of a JSON token, use Python's
+     `curl_cffi` (`pip3 install curl_cffi`) with `impersonate="chrome"`
+     instead of `curl`/`requests` for this one call - it presents a real
+     Chrome TLS fingerprint and sails through.
    ```
-   curl -s -X POST YOUR_FLEET_API_BASE_URL/api/1/vehicles/fleet_telemetry_config \
-     -H "Authorization: Bearer $(python3 -c "import json;print(json.load(open('app_token.json'))['access_token'])")" \
+   curl -sk -X POST https://localhost:PROXY_PORT/api/1/vehicles/fleet_telemetry_config \
+     -H "Authorization: Bearer $USER_OAUTH_ACCESS_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{
        "vins": ["YOUR_VIN"],
@@ -158,7 +179,10 @@ depends on it being sslip.io specifically.
          "fields": {
            "Soc": { "interval_seconds": 60 },
            "DetailedChargeState": { "interval_seconds": 10 },
-           "ChargePortDoorOpen": { "interval_seconds": 30 }
+           "ChargePortDoorOpen": { "interval_seconds": 30 },
+           "ChargeAmps": { "interval_seconds": 10 },
+           "ACChargingPower": { "interval_seconds": 10 },
+           "ChargeLimitSoc": { "interval_seconds": 300 }
          }
        }
      }'

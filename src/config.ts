@@ -49,6 +49,13 @@ const schema = z.object({
   // How long a telemetry hint is trusted before it's considered stale and
   // the controller falls back to a direct poll.
   TESLA_TELEMETRY_STALE_MS: numeric().default("600000"),
+  // Tighter staleness threshold specifically for the charging-power fields
+  // (ChargeAmps/ACChargingPower) trusted during an active charging session -
+  // shorter than TESLA_TELEMETRY_STALE_MS because the ramp loop needs a
+  // recent reading to charge accurately, not just "the vehicle is still
+  // around". If exceeded while chargingState says "Charging", the
+  // controller falls back to a direct poll for that cycle.
+  TESLA_TELEMETRY_CHARGING_STALE_MS: numeric().default("90000"),
   // Minimum gap between direct recovery polls while telemetry is stale, so
   // a vehicle that's offline/deep-asleep doesn't get polled every cycle.
   TESLA_TELEMETRY_RECOVERY_POLL_MS: numeric().default("300000"),
@@ -99,6 +106,7 @@ export const config = {
     telemetryLogPath: env.TESLA_TELEMETRY_LOG_PATH || undefined,
     telemetryErrorLogPath: env.TESLA_TELEMETRY_ERROR_LOG_PATH || undefined,
     telemetryStaleMs: env.TESLA_TELEMETRY_STALE_MS!,
+    telemetryChargingStaleMs: env.TESLA_TELEMETRY_CHARGING_STALE_MS!,
     telemetryRecoveryPollMs: env.TESLA_TELEMETRY_RECOVERY_POLL_MS!,
     rateLimitCooldownMs: env.TESLA_RATE_LIMIT_COOLDOWN_MS!,
   },

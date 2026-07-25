@@ -2,10 +2,15 @@ import { EventEmitter } from "node:events";
 import { config } from "../config.js";
 import { GoodweSemsClient, SolarSnapshot } from "../goodwe/client.js";
 import { TeslaApiError, TeslaFleetClient, VehicleChargeState } from "../tesla/client.js";
-import { TelemetryIngest } from "../tesla/telemetry.js";
+import { TelemetryHint, TelemetryIngest } from "../tesla/telemetry.js";
 import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "controller" });
+
+// No realistic home AC charging setup draws anywhere near this - a
+// telemetry reading above it almost certainly means ACChargingPower's
+// actual units don't match the kW assumption in tesla/telemetry.ts.
+const SANITY_MAX_CHARGER_POWER_W = 30_000;
 
 export interface OverrideState {
   /** false = fully off, ignore solar. true = automatic solar-following. */
@@ -200,26 +205,27 @@ export class ChargeController extends EventEmitter {
     this.status.telemetryLastSeenAt = hint?.lastSeenAt ?? null;
 
     if (hintFresh && hint.chargingState === "Charging") {
-      // Active session: need authoritative amp/voltage data for the ramp
-      // loop, so this is the one case that still polls every cycle.
+      const chargingDataFresh =
+        hint.chargingDataLastSeenAt !== null &&
+        now - hint.chargingDataLastSeenAt.getTime() <= config.tesla.telemetryChargingStaleMs;
+
+      if (chargingDataFresh) {
+        // Telemetry is delivering real, recent ChargeAmps/ACChargingPower
+        // readings - the ramp loop can run on that instead of polling.
+        return this.buildStateFromHint(hint);
+      }
+
+      // Charging per telemetry, but the charging-power fields specifically
+      // haven't reported anything recent (session just started and hasn't
+      // caught up yet, or they've gone stale independent of the general
+      // hint). Poll once for authoritative numbers; once telemetry catches
+      // up, subsequent cycles go back to the branch above.
       const polled = await this.pollDirect({ wakeOnFailure: false });
       return polled ?? this.lastPolledVehicle;
     }
 
     if (hintFresh) {
-      // Plugged-in/idle/disconnected: the decide() branches that run for a
-      // non-charging vehicle never read chargerVoltage/chargerActualCurrent,
-      // so a hint-derived stand-in is safe here (see tesla/telemetry.ts).
-      return {
-        chargingState: hint.chargingState,
-        chargeAmps: 0,
-        chargeLimitSoc: this.lastPolledVehicle?.chargeLimitSoc ?? 0,
-        batteryLevel: hint.batteryLevel,
-        chargerVoltage: 0,
-        chargerActualCurrent: 0,
-        pluggedIn: hint.pluggedIn,
-        timestamp: hint.lastSeenAt,
-      };
+      return this.buildStateFromHint(hint);
     }
 
     // No hint yet, or telemetry has gone quiet (car offline/deep asleep,
@@ -245,6 +251,35 @@ export class ChargeController extends EventEmitter {
       return this.lastPolledVehicle;
     }
     return this.pollDirect({ wakeOnFailure: this.status.override.enabled && this.consecutiveFailures === 0 });
+  }
+
+  /**
+   * decide()'s ramp math only ever uses chargerVoltage * chargerActualCurrent
+   * as a product (never independently), so splitting hint.chargerPowerW into
+   * a nominal voltage and a back-derived "current" that multiplies out to
+   * the same real watts is exact for that purpose, while still leaving both
+   * fields individually plausible for dashboard display.
+   */
+  private buildStateFromHint(hint: TelemetryHint): VehicleChargeState {
+    if (hint.chargerPowerW > SANITY_MAX_CHARGER_POWER_W) {
+      log.warn(
+        { chargerPowerW: hint.chargerPowerW },
+        "Telemetry chargerPowerW is implausibly high - possible unit mismatch in ACChargingPower parsing (see tesla/telemetry.ts)"
+      );
+    }
+    const chargerVoltage = hint.chargerPowerW > 0 ? config.chargerVoltage : 0;
+    const chargerActualCurrent = chargerVoltage > 0 ? hint.chargerPowerW / chargerVoltage : 0;
+
+    return {
+      chargingState: hint.chargingState,
+      chargeAmps: hint.chargeAmps,
+      chargeLimitSoc: hint.chargeLimitSoc || this.lastPolledVehicle?.chargeLimitSoc || 0,
+      batteryLevel: hint.batteryLevel,
+      chargerVoltage,
+      chargerActualCurrent,
+      pluggedIn: hint.pluggedIn,
+      timestamp: hint.lastSeenAt,
+    };
   }
 
   private async pollDirect(opts: { wakeOnFailure: boolean }): Promise<VehicleChargeState | null> {
