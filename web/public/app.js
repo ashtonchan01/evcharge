@@ -24,6 +24,17 @@ function setText(id, text) {
   if (el) el.textContent = text;
 }
 
+let nextPollAt = null;
+
+function tickCountdown() {
+  if (!nextPollAt) {
+    setText("next-poll", "–");
+    return;
+  }
+  const secsLeft = Math.round((nextPollAt - Date.now()) / 1000);
+  setText("next-poll", secsLeft > 0 ? `${secsLeft}s` : "due");
+}
+
 function render(status) {
   const s = status.solar;
   const pv = s ? s.pvPowerW : null;
@@ -58,6 +69,9 @@ function render(status) {
   setText("last-poll", fmtTime(status.lastPollAt));
   setText("last-error", status.lastError || "");
 
+  nextPollAt = status.lastPollAt ? new Date(status.lastPollAt).getTime() + status.pollIntervalMs : null;
+  tickCountdown();
+
   $("enabled-toggle").checked = status.override.enabled;
   setText("enabled-label", status.override.enabled ? "On" : "Off");
 
@@ -81,7 +95,13 @@ async function fetchStatus() {
 
 async function loadVehicles() {
   const res = await fetch("/api/vehicles");
-  if (!res.ok) return;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const select = $("vehicle-select");
+    select.innerHTML = `<option value="">Couldn't load vehicles (${body.error || res.status})</option>`;
+    flash("override-message", `Couldn't load vehicles: ${body.error || res.status}`);
+    return;
+  }
 
   const vehicles = await res.json();
   const select = $("vehicle-select");
@@ -196,3 +216,4 @@ function connectWs() {
 fetchStatus();
 loadVehicles();
 connectWs();
+setInterval(tickCountdown, 1000);

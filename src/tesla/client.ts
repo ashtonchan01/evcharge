@@ -5,6 +5,18 @@ import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "tesla" });
 
+/** Carries the HTTP status so callers can distinguish "rate limited/account
+ * disabled" (stop hammering) from an ordinary transient failure (retry). */
+export class TeslaApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = "TeslaApiError";
+  }
+}
+
 const TESLA_AUTH_URL = "https://auth.tesla.com/oauth2/v3/token";
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -151,7 +163,7 @@ export class TeslaFleetClient {
     }
 
     if (!res.ok) {
-      throw new Error(`Tesla request ${method} ${path} failed: HTTP ${res.status} ${text}`);
+      throw new TeslaApiError(`Tesla request ${method} ${path} failed: HTTP ${res.status} ${text}`, res.status);
     }
 
     return parsed as T;

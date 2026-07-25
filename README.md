@@ -29,7 +29,10 @@ GoodWe SEMS portal  --poll-->  controller  --OAuth token-->  Tesla Fleet API
   `surplus = pvPower - householdLoad - buffer`, converts it to an amp
   target, and starts/stops/adjusts the car's charge rate. Uses
   hysteresis (separate start/stop thresholds) and a stable-cycle counter
-  so it doesn't flap when a cloud passes over.
+  so it doesn't flap when a cloud passes over. Vehicle state comes from
+  **src/tesla/telemetry.ts** (pushed, free) rather than polling
+  `vehicle_data` (billed) whenever `TESLA_TELEMETRY_LOG_PATH` is set - see
+  "Setting up Fleet Telemetry" below.
 - **src/server/index.ts** — serves the dashboard, `GET /api/status`, and
   `POST /api/enabled` to turn solar charging on/off. Pushes live updates
   over WebSocket at `/ws`.
@@ -79,6 +82,106 @@ know because commands fail with "Tesla Vehicle Command Protocol required."
 7. Run the proxy: `./tesla-http-proxy -tls-key server-key.pem -cert server-cert.pem -key-file private-key.pem -port 4443`
 8. Set `TESLA_COMMAND_PROXY_URL=https://localhost:4443` in `.env` and keep
    the proxy running alongside this app.
+
+## Setting up Fleet Telemetry (avoids Tesla API billing)
+
+Since Feb 2025, Tesla's Fleet API is pay-per-use - `vehicle_data` polling
+every `POLL_INTERVAL_MS` all day is exactly the kind of usage that runs up
+a bill (ChargeHQ hit the same wall and migrated off polling entirely -
+see [their Fleet Telemetry FAQ](https://chargehq.net/kb/tesla-fleet-telemetry-faq)).
+Fleet Telemetry flips the model: the car pushes state to a server you
+run, only when something changes, instead of you asking for it on a
+timer. This app uses telemetry as a free, always-on "is it plugged in /
+charging" signal, and only falls back to a real (billed) `vehicle_data`
+poll while a charge session is actually active, when precise
+charger_actual_current/voltage matters for the amp-ramp math - see the
+comments in `src/controller/index.ts` and `src/tesla/telemetry.ts`.
+
+You already have everything Fleet Telemetry needs if you set up the
+signed-command proxy above: a registered developer domain, a hosted
+public key, and a paired virtual key on the vehicle. Note that the
+`ashtonchan01.github.io` domain used for the public-key/virtual-key steps
+can't be used here - GitHub Pages only serves static files and GitHub
+controls its DNS zone, so there's no way to add a record for it pointing
+at the Oracle box. This deployment instead uses
+[sslip.io](https://sslip.io) (`161-33-228-226.sslip.io`), a free wildcard
+DNS service that resolves any `<anything>.<ip-with-dashes>.sslip.io`
+straight to that IP with no registrar/DNS account needed - Let's Encrypt
+can issue a normal cert for it via the ordinary HTTP-01 challenge. Swap
+in a real domain later if you get one; nothing else about this setup
+depends on it being sslip.io specifically.
+
+1. Clone and build Tesla's telemetry server (separate repo from
+   `vehicle-command`, needs Go 1.26+, newer than what Ubuntu 22.04's apt
+   repo ships - install from https://go.dev/dl/ if `go version` shows
+   something older): `git clone https://github.com/teslamotors/fleet-telemetry.git && cd fleet-telemetry && go build -o fleet-telemetry ./cmd/`
+2. Point a real hostname at the box this app runs on - see the sslip.io
+   note above, or a subdomain of a real domain you control as an A record
+   to the Oracle instance's public IP - and get a **real CA-signed TLS
+   cert** for it, e.g. via `certbot certonly --standalone -d
+   your-hostname`. Unlike the local `tesla-http-proxy`, the car validates
+   this cert over the public internet like a browser would, so a
+   self-signed cert won't work here.
+3. Write a `config.json` for the server - at minimum a TLS cert/key path,
+   a port (open it the same way port 3000 was opened - see
+   `oracle_cloud_evcharge_infra` notes on iptables), and a `logger`
+   dispatcher so readings land in a plain JSON-lines file this app can
+   tail:
+   ```json
+   {
+     "host": "0.0.0.0",
+     "port": 443,
+     "tls": { "server_cert": "/path/to/fullchain.pem", "server_key": "/path/to/privkey.pem" },
+     "records": { "V": ["logger"], "alerts": ["logger"], "errors": ["logger"] }
+   }
+   ```
+   `src/tesla/telemetry.ts`'s field names (`Soc`, `DetailedChargeState`,
+   `ChargePortDoorOpen`) and its parsing of the logger dispatcher's output
+   shape were both confirmed directly against a real
+   `teslamotors/fleet-telemetry` checkout (`protos/vehicle_data.proto` and
+   `datastore/simple/logger.go`/`transformers/payload.go`) - if a future
+   version of that repo changes either, that's where to look first. Run
+   the server under pm2 like `tesla-http-proxy`, and redirect its stdout
+   to a file (pm2 does this automatically under `~/.pm2/logs/`).
+4. Push the streaming config to the vehicle (one-time, using the same
+   app-level `client_credentials` token from the proxy setup above):
+   ```
+   curl -s -X POST YOUR_FLEET_API_BASE_URL/api/1/vehicles/fleet_telemetry_config \
+     -H "Authorization: Bearer $(python3 -c "import json;print(json.load(open('app_token.json'))['access_token'])")" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "vins": ["YOUR_VIN"],
+       "config": {
+         "hostname": "telemetry.yourdomain",
+         "port": 443,
+         "ca": "'"$(cat /path/to/fullchain.pem | sed ':a;N;$!ba;s/\n/\\n/g')"'",
+         "fields": {
+           "Soc": { "interval_seconds": 60 },
+           "DetailedChargeState": { "interval_seconds": 10 },
+           "ChargePortDoorOpen": { "interval_seconds": 30 }
+         }
+       }
+     }'
+   ```
+5. Set `TESLA_TELEMETRY_LOG_PATH` in `.env` to the pm2 log file from step
+   3 and restart. `TESLA_VEHICLE_TAG` needs to be the VIN (not the
+   numeric vehicle id) in this mode, since telemetry records key by VIN.
+   Also set `TESLA_TELEMETRY_ERROR_LOG_PATH` to the same process's pm2
+   *error* log - fleet-telemetry's Go logger has been observed writing its
+   actual `record_payload` data to stderr rather than stdout, so tailing
+   only the "out" log can silently receive nothing while telemetry is
+   working fine. The app tails both if both are set.
+6. Watch the log for a minute after plugging in / unplugging to confirm
+   readings are arriving, then check the dashboard's telemetry-last-seen
+   timestamp updates.
+
+Model S/X with an Intel Atom infotainment computer need "Allow
+Third-Party App Data Streaming" enabled manually on the car's touchscreen
+first - everything else should Just Work once the config push succeeds.
+
+If any of this doesn't match what you see (wrong field names, no data
+arriving), the app keeps working by falling back to the old
+always-poll behavior - it just costs what it cost before.
 
 ## Tuning
 
