@@ -54,18 +54,19 @@ function render(status) {
   const v = status.vehicle;
   setText("plugged", v ? (v.pluggedIn ? "Yes" : "No") : "unknown");
   setText("charging-state", v ? v.chargingState : "unknown");
-  setText("amps", v ? `${v.chargeAmps} A` : "–");
+  setText("amps", v ? `${Math.round(v.chargeAmps)} A` : "–");
 
   const batteryLevel = v ? v.batteryLevel : null;
+  const batteryLevelRounded = batteryLevel !== null && batteryLevel !== undefined ? Math.round(batteryLevel) : null;
   const fill = $("battery-fill");
-  fill.style.width = batteryLevel !== null && batteryLevel !== undefined ? `${batteryLevel}%` : "0%";
-  setText("battery-label", batteryLevel !== null && batteryLevel !== undefined ? `${batteryLevel}%` : "–");
+  fill.style.width = batteryLevelRounded !== null ? `${batteryLevelRounded}%` : "0%";
+  setText("battery-label", batteryLevelRounded !== null ? `${batteryLevelRounded}%` : "–");
 
   const decisionEl = $("decision");
   decisionEl.textContent = status.decision.replace(/_/g, " ");
   decisionEl.className = `decision-pill ${status.decision}`;
 
-  setText("target-amps", status.targetAmps !== null ? `${status.targetAmps} A` : "–");
+  setText("target-amps", status.targetAmps !== null ? `${Math.round(status.targetAmps)} A` : "–");
   setText("last-poll", fmtTime(status.lastPollAt));
   setText("last-error", status.lastError || "");
 
