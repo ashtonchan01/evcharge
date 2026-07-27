@@ -75,6 +75,10 @@ export class ChargeController extends EventEmitter {
   // used when telemetry is merely stale, even with solar charging on.
   private consecutiveFailures = 0;
   private static readonly MAX_UNTHROTTLED_RETRIES = 3;
+  // Wall-clock companion bound to MAX_UNTHROTTLED_RETRIES (see
+  // resolveVehicleState) - reset whenever override is turned on.
+  private unthrottledGraceStartedAt = 0;
+  private static readonly UNTHROTTLED_GRACE_WINDOW_MS = 2 * 60 * 1000;
   // Set on a 403/429 from Tesla - a hard signal to stop calling Tesla
   // entirely (reads, commands, wake_up) until this time, rather than
   // retrying every cycle into an account-level block that retrying won't
@@ -112,6 +116,10 @@ export class ChargeController extends EventEmitter {
     log.info({ enabled, setBy }, "Enabled state changed");
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
+    if (enabled) {
+      this.consecutiveFailures = 0;
+      this.unthrottledGraceStartedAt = Date.now();
+    }
     this.emitUpdate();
   }
 
@@ -201,7 +209,20 @@ export class ChargeController extends EventEmitter {
 
     const vin = this.tesla.getVehicleTag();
     const hint = this.telemetry.getHint(vin);
-    const hintFresh = hint !== undefined && now - hint.lastSeenAt.getTime() <= config.tesla.telemetryStaleMs;
+    // Tesla only pushes DetailedChargeState/ChargePortDoorOpen on *change*,
+    // not periodically - so right after a restart (hint map starts empty),
+    // a vehicle that's been steadily "Charging" the whole time won't get a
+    // fresh push until its state actually changes, potentially for the
+    // rest of the session. Meanwhile other fields (ACChargingPower) that do
+    // change continuously keep refreshing lastSeenAt, which would make a
+    // pure time-based check see this as "fresh" despite chargingState still
+    // being unknown - requiring a known chargingState too routes that case
+    // into the same poll-fallback below instead of confidently (and
+    // wrongly) treating an actively-charging vehicle as unplugged/idle.
+    const hintFresh =
+      hint !== undefined &&
+      hint.chargingState !== "Unknown" &&
+      now - hint.lastSeenAt.getTime() <= config.tesla.telemetryStaleMs;
     this.status.telemetryLastSeenAt = hint?.lastSeenAt ?? null;
 
     if (hintFresh && hint.chargingState === "Charging") {
@@ -228,24 +249,31 @@ export class ChargeController extends EventEmitter {
       return this.buildStateFromHint(hint);
     }
 
-    // No hint yet, or telemetry has gone quiet (car offline/deep asleep,
-    // the ingest pipe itself is down, or this vehicle just never
-    // established a telemetry connection). Rate-limit the recovery poll so
-    // a persistently unreachable vehicle doesn't rack up Data/Wake cost
+    // No hint yet, telemetry has gone quiet, or chargingState specifically
+    // is still unknown (car offline/deep asleep, the ingest pipe itself is
+    // down, this vehicle never established a telemetry connection, or it's
+    // the post-restart gap described above). Rate-limit the recovery poll
+    // so a persistently unreachable vehicle doesn't rack up Data/Wake cost
     // every 30s.
     //
     // Solar charging being on gets a short grace window of full-cadence
-    // retries (MAX_UNTHROTTLED_RETRIES) in case the car is mid-wake and
-    // about to answer - but NOT an indefinite one. A vehicle that's failed
-    // several times in a row isn't "about to answer any second", it's
-    // unreachable, and hammering it every 30s bought nothing but a 403
-    // account-level suspension last time this ran unthrottled for hours.
-    // Once that grace window is used up, fall back to the same slow
-    // recovery cadence used when charging is off, until a poll actually
-    // succeeds (which resets the counter) or the caller flips override off.
+    // retries in case the car is mid-wake and about to answer - but NOT an
+    // indefinite one. Bounded by BOTH a retry count and a wall-clock
+    // window: count alone isn't enough, because a *successful* poll resets
+    // consecutiveFailures to 0, and if chargingState stays unknown for
+    // reasons other than unreachability (the post-restart gap above -
+    // every poll can keep succeeding while telemetry still never reports
+    // the field), count-only would keep the grace window open, and thus
+    // the unthrottled 30s cadence, indefinitely - which is exactly the
+    // hours-long hammering that caused the 2026-07-25 rate-limit incident.
+    // pollDirect() success also seeds the telemetry hint's chargingState
+    // directly, which is the real fix for that gap - this time bound is
+    // defense in depth for whatever isn't covered by that.
     const dueForRecoveryPoll = now - this.lastFallbackAttemptAt >= config.tesla.telemetryRecoveryPollMs;
     const withinUnthrottledGrace =
-      this.status.override.enabled && this.consecutiveFailures < ChargeController.MAX_UNTHROTTLED_RETRIES;
+      this.status.override.enabled &&
+      this.consecutiveFailures < ChargeController.MAX_UNTHROTTLED_RETRIES &&
+      now - this.unthrottledGraceStartedAt < ChargeController.UNTHROTTLED_GRACE_WINDOW_MS;
 
     if (!dueForRecoveryPoll && !withinUnthrottledGrace) {
       return this.lastPolledVehicle;
@@ -288,6 +316,11 @@ export class ChargeController extends EventEmitter {
       const vehicle = await this.tesla.getChargeState();
       this.lastPolledVehicle = vehicle;
       this.consecutiveFailures = 0;
+      // Backfill telemetry's chargingState/pluggedIn from this authoritative
+      // read if telemetry hasn't reported them yet (see the post-restart
+      // gap explained in resolveVehicleState) - lets subsequent cycles use
+      // the telemetry-driven branch instead of polling again next tick.
+      this.telemetry?.seedChargingState(this.tesla.getVehicleTag(), vehicle.chargingState, vehicle.pluggedIn);
       return vehicle;
     } catch (err) {
       this.consecutiveFailures += 1;

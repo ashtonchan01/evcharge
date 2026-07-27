@@ -58,6 +58,24 @@ function normalizeChargingState(raw: string): string {
 }
 
 /**
+ * chargingState is a far more reliable plugged-in signal than
+ * ChargePortDoorOpen: it's authoritative (the vehicle can't be
+ * "Charging"/"Complete"/"Stopped" while unplugged, and "Disconnected" is
+ * unambiguous), whereas ChargePortDoorOpen only updates on its own
+ * interval/change events and may simply not have arrived yet - notably
+ * right after a restart, before any prior hint exists. Falling back to
+ * `false` in that gap (the previous behavior) made a freshly-restarted,
+ * actively-charging vehicle look unplugged and skipped decide()'s ramp
+ * logic entirely - see evcharge_project memory, 2026-07-27 charging test.
+ */
+function inferPluggedIn(chargingState: string, chargePortDoorOpen: unknown, prior: TelemetryHint | undefined): boolean {
+  if (chargingState === "Disconnected") return false;
+  if (chargingState === "Charging" || chargingState === "Complete" || chargingState === "Stopped") return true;
+  if (typeof chargePortDoorOpen === "boolean") return chargePortDoorOpen;
+  return prior?.pluggedIn ?? false;
+}
+
+/**
  * Shape confirmed by reading teslamotors/fleet-telemetry's
  * datastore/simple/logger.go + transformers/payload.go on the deployed
  * server: the "logger" dispatcher runs each Payload through
@@ -123,6 +141,29 @@ export class TelemetryIngest extends EventEmitter {
     return this.byVin.get(vin);
   }
 
+  /**
+   * Backfills chargingState/pluggedIn from an authoritative source (a
+   * direct vehicle_data poll) when telemetry hasn't reported them yet.
+   * Tesla only pushes DetailedChargeState/ChargePortDoorOpen on change, so
+   * a value that was already true before this process started (e.g. a
+   * session that was charging before a restart) may otherwise never
+   * arrive via telemetry at all for the rest of that session - see
+   * src/controller/index.ts's resolveVehicleState for the full story.
+   * Never overwrites a chargingState telemetry has already established
+   * (its own updates always win once they arrive) - this only fills the
+   * gap while telemetry's value is still "Unknown". Requires telemetry to
+   * have reported *something* for this VIN already (a hint must exist) -
+   * deliberately does not fabricate a hint from nothing, since that would
+   * mean this poll-derived value gets misread as telemetry health
+   * (telemetryLastSeenAt is sourced straight from hint.lastSeenAt).
+   */
+  seedChargingState(vin: string, chargingState: string, pluggedIn: boolean): void {
+    const prior = this.byVin.get(vin);
+    if (!prior || prior.chargingState !== "Unknown") return;
+
+    this.byVin.set(vin, { ...prior, chargingState, pluggedIn });
+  }
+
   private handleLine(line: string): void {
     const parsed = extractVehicleFields(line);
     if (!parsed) return;
@@ -161,12 +202,12 @@ export class TelemetryIngest extends EventEmitter {
     const now = new Date();
     const hasChargingData = typeof chargeAmps === "number" || typeof acChargingPowerKw === "number";
 
+    const chargingState =
+      typeof detailedChargeState === "string" ? normalizeChargingState(detailedChargeState) : prior?.chargingState ?? "Unknown";
+
     const hint: TelemetryHint = {
-      chargingState:
-        typeof detailedChargeState === "string"
-          ? normalizeChargingState(detailedChargeState)
-          : prior?.chargingState ?? "Unknown",
-      pluggedIn: typeof chargePortDoorOpen === "boolean" ? chargePortDoorOpen : prior?.pluggedIn ?? false,
+      chargingState,
+      pluggedIn: inferPluggedIn(chargingState, chargePortDoorOpen, prior),
       batteryLevel: typeof soc === "number" ? soc : prior?.batteryLevel ?? 0,
       chargeAmps: typeof chargeAmps === "number" ? chargeAmps : prior?.chargeAmps ?? 0,
       chargerPowerW: typeof acChargingPowerKw === "number" ? acChargingPowerKw * 1000 : prior?.chargerPowerW ?? 0,
