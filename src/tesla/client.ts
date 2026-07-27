@@ -1,4 +1,5 @@
 import fetch from "cross-fetch";
+import fs from "node:fs";
 import https from "node:https";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
@@ -76,16 +77,34 @@ export class TeslaFleetClient {
   // requests, not a global TLS bypass.
   private readonly proxyAgent = new https.Agent({ rejectUnauthorized: false });
 
+  private refreshToken: string;
+
   constructor(
     baseUrl: string,
     private readonly clientId: string,
     private readonly clientSecret: string,
-    private readonly refreshToken: string,
+    refreshToken: string,
     private vehicleTag: string,
-    commandProxyUrl?: string
+    commandProxyUrl?: string,
+    private readonly refreshTokenPath?: string
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.commandProxyUrl = commandProxyUrl ? commandProxyUrl.replace(/\/+$/, "") : null;
+    // A previously-persisted rotated token (see refreshAccessToken) is
+    // always fresher than whatever's baked into .env, since .env only gets
+    // updated by hand.
+    const persisted = this.readPersistedRefreshToken();
+    this.refreshToken = persisted ?? refreshToken;
+  }
+
+  private readPersistedRefreshToken(): string | undefined {
+    if (!this.refreshTokenPath) return undefined;
+    try {
+      const contents = fs.readFileSync(this.refreshTokenPath, "utf8").trim();
+      return contents || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   getVehicleTag(): string {
@@ -118,8 +137,34 @@ export class TeslaFleetClient {
       throw new Error(`Tesla token refresh failed: HTTP ${res.status} ${await res.text()}`);
     }
 
-    const body = (await res.json()) as { access_token: string };
+    const body = (await res.json()) as { access_token: string; refresh_token?: string };
     this.accessToken = body.access_token;
+
+    // Tesla's token endpoint can return a rotated refresh_token on any
+    // grant - if it's silently discarded (as this used to do), the token
+    // stored in .env eventually becomes stale and every future refresh
+    // fails with "The refresh_token is invalid", with no warning until it
+    // happens. Persist any new one immediately so a restart always uses
+    // the latest, not whatever was in .env at initial setup.
+    if (body.refresh_token && body.refresh_token !== this.refreshToken) {
+      this.refreshToken = body.refresh_token;
+      if (this.refreshTokenPath) {
+        try {
+          fs.writeFileSync(this.refreshTokenPath, body.refresh_token, "utf8");
+          log.info({ path: this.refreshTokenPath }, "Tesla rotated the refresh token - persisted the new one");
+        } catch (err) {
+          log.error(
+            { err: String(err), path: this.refreshTokenPath },
+            "Tesla rotated the refresh token but persisting it to disk failed - the next restart will use a stale token and fail"
+          );
+        }
+      } else {
+        log.warn(
+          "Tesla rotated the refresh token but TESLA_REFRESH_TOKEN_PATH isn't set, so it can't be persisted - the next restart will use the stale .env value and fail"
+        );
+      }
+    }
+
     return this.accessToken;
   }
 
@@ -248,6 +293,7 @@ export function createTeslaClient(): TeslaFleetClient {
     config.tesla.clientSecret,
     config.tesla.refreshToken,
     config.tesla.vehicleTag,
-    config.tesla.commandProxyUrl
+    config.tesla.commandProxyUrl,
+    config.tesla.refreshTokenPath
   );
 }

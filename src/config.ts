@@ -29,6 +29,14 @@ const schema = z.object({
   TESLA_CLIENT_ID: z.string().min(1),
   TESLA_CLIENT_SECRET: z.string().min(1),
   TESLA_REFRESH_TOKEN: z.string().min(1),
+  // Optional: file path where a rotated refresh_token (see tesla/client.ts)
+  // gets persisted. If the file exists, its contents win over
+  // TESLA_REFRESH_TOKEN above at startup, since .env only reflects
+  // whatever was valid at initial setup. Strongly recommended - without
+  // it, a rotated token can only ever be used in-memory for the current
+  // process lifetime, and the next restart falls back to the stale .env
+  // value and fails outright.
+  TESLA_REFRESH_TOKEN_PATH: z.string().optional(),
   TESLA_VEHICLE_TAG: z.string().min(1),
   // Optional: local tesla-http-proxy URL for vehicles that require Tesla's
   // signed Vehicle Command Protocol (anything except pre-2021 Model S/X).
@@ -101,6 +109,7 @@ export const config = {
     clientId: env.TESLA_CLIENT_ID,
     clientSecret: env.TESLA_CLIENT_SECRET,
     refreshToken: env.TESLA_REFRESH_TOKEN,
+    refreshTokenPath: env.TESLA_REFRESH_TOKEN_PATH || undefined,
     vehicleTag: env.TESLA_VEHICLE_TAG,
     commandProxyUrl: env.TESLA_COMMAND_PROXY_URL || undefined,
     telemetryLogPath: env.TESLA_TELEMETRY_LOG_PATH || undefined,
