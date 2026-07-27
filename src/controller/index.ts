@@ -203,12 +203,29 @@ export class ChargeController extends EventEmitter {
     }
     this.status.rateLimitedUntil = null;
 
+    const vin = this.tesla.getVehicleTag();
+    const hint = this.telemetry?.getHint(vin);
+
+    if (!this.status.override.enabled) {
+      // Fully hands-off: never call Tesla (not even a read/poll) while
+      // disabled, so the dashboard and its toggle stay reachable without
+      // the app itself touching the vehicle - leaving the pm2 process
+      // running with the toggle off must be equivalent to stopping it,
+      // otherwise there's no way to reach the toggle to turn it back on
+      // without SSHing in. Free telemetry (if any) still updates the
+      // display; nothing else does. See evcharge_project memory,
+      // 2026-07-27.
+      const disabledHintFresh =
+        hint !== undefined &&
+        hint.chargingState !== "Unknown" &&
+        now - hint.lastSeenAt.getTime() <= config.tesla.telemetryStaleMs;
+      this.status.telemetryLastSeenAt = hint?.lastSeenAt ?? null;
+      return disabledHintFresh ? this.buildStateFromHint(hint) : this.lastPolledVehicle;
+    }
+
     if (!this.telemetry) {
       return this.pollDirect({ wakeOnFailure: true });
     }
-
-    const vin = this.tesla.getVehicleTag();
-    const hint = this.telemetry.getHint(vin);
     // Tesla only pushes DetailedChargeState/ChargePortDoorOpen on *change*,
     // not periodically - so right after a restart (hint map starts empty),
     // a vehicle that's been steadily "Charging" the whole time won't get a
