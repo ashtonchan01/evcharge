@@ -358,11 +358,18 @@ export class ChargeController extends EventEmitter {
     }
 
     if (!this.status.override.enabled) {
+      // Fully hands-off when disabled - no commands to the vehicle at all,
+      // not even a "cleanup" stop. This used to stop_charge whenever it
+      // saw "Charging" while disabled (on the assumption evcharge itself
+      // had started that session), but that meant the toggle only ever
+      // controlled evcharge's own *decisions*, not whether it touched the
+      // car - with the pm2 process left running, it kept firing charge_stop
+      // at any session it saw, including ones started by something else
+      // entirely (ChargeHQ, the Tesla app, manual start) - see
+      // evcharge_project memory, 2026-07-27. The toggle is now the actual
+      // on/off switch: disabled means don't send anything, full stop.
       this.status.decision = "idle";
       this.status.targetAmps = null;
-      if (vehicle?.chargingState === "Charging") {
-        await this.tesla.stopCharging().catch((err) => log.warn({ err: String(err) }, "stop failed"));
-      }
       return;
     }
 
