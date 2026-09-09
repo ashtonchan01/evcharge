@@ -191,6 +191,77 @@ $("buffer-form").addEventListener("submit", async (e) => {
   flash("override-message", `Grid import buffer set to ${bufferW} W.`);
 });
 
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+}
+
+async function refreshNotifyButton() {
+  const button = $("notify-button");
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    button.disabled = true;
+    button.textContent = "Notifications not supported in this browser";
+    return;
+  }
+
+  if (Notification.permission === "denied") {
+    button.disabled = true;
+    button.textContent = "Notifications blocked in browser settings";
+    return;
+  }
+
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  button.textContent = existing ? "Notifications enabled" : "Enable notifications";
+  button.disabled = Boolean(existing);
+}
+
+async function enablePush() {
+  const button = $("notify-button");
+  try {
+    const keyRes = await fetch("/api/push/public-key");
+    const { publicKey, enabled } = await keyRes.json();
+    if (!enabled || !publicKey) {
+      flash("notify-message", "Push notifications aren't configured on the server.");
+      return;
+    }
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      flash("notify-message", "Notification permission was not granted.");
+      return;
+    }
+
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    });
+
+    await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(subscription),
+    });
+
+    flash("notify-message", "Notifications enabled - you'll get an alert when charging completes.");
+    await refreshNotifyButton();
+  } catch (err) {
+    flash("notify-message", `Couldn't enable notifications: ${err.message || err}`);
+  }
+}
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker
+    .register("/sw.js")
+    .then(() => refreshNotifyButton())
+    .catch(() => {});
+}
+
+$("notify-button").addEventListener("click", enablePush);
+
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);

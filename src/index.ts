@@ -4,6 +4,7 @@ import { createTeslaClient } from "./tesla/client.js";
 import { createTelemetryIngest } from "./tesla/telemetry.js";
 import { ChargeController } from "./controller/index.js";
 import { startServer } from "./server/index.js";
+import { createPushService } from "./push/index.js";
 import { logger } from "./util/logger.js";
 
 const log = logger.child({ module: "main" });
@@ -17,9 +18,13 @@ if (!telemetry) {
   );
 }
 const controller = new ChargeController(goodwe, tesla, telemetry);
+const push = createPushService();
+if (!push.isEnabled()) {
+  log.warn("VAPID keys not set - charge-complete push notifications disabled");
+}
 
 controller.start();
-startServer(controller, tesla);
+startServer(controller, tesla, push);
 
 process.on("SIGINT", () => {
   log.info("Shutting down");

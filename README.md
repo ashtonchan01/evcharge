@@ -222,6 +222,23 @@ The grid import buffer (solar reserved for the house before offering any
 to the car) isn't in `.env` - it's set live from the dashboard, starts at
 0W on boot, and calls `POST /api/buffer` with `{ "bufferW": <watts> }`.
 
+## Notifications
+
+The controller already auto-disables solar charging (`setEnabled(false)`)
+the moment the vehicle reports `chargingState: "Complete"` - see
+`decide()` in `src/controller/index.ts` - both to respect the car's own
+charge limit and to stop paying for poll/command cycles once there's
+nothing left to do.
+
+To also get a push notification on that event: set `VAPID_PUBLIC_KEY` /
+`VAPID_PRIVATE_KEY` in `.env` (generate with `npx web-push
+generate-vapid-keys`), restart, then click "Enable notifications" on the
+dashboard once per browser/device. This requires the dashboard be served
+over **HTTPS** - service workers won't register over plain HTTP except on
+localhost. Subscriptions are stored in `PUSH_SUBSCRIPTIONS_PATH`
+(`.push-subscriptions.json` by default) and pruned automatically once a
+browser/OS reports one as gone (404/410).
+
 ## On/off toggle
 
 The dashboard has a single switch. On: the controller follows solar

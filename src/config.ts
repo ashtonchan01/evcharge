@@ -72,6 +72,16 @@ const schema = z.object({
   // rate limit doesn't clear by retrying sooner and every retry just adds
   // to whatever got it disabled in the first place.
   TESLA_RATE_LIMIT_COOLDOWN_MS: numeric().default("1800000"),
+
+  // Web Push (browser notifications, e.g. "charging complete"). Optional -
+  // leave unset to disable the feature entirely. Generate with
+  // `npx web-push generate-vapid-keys`.
+  VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  // Contact address Web Push services use to reach the sender if a
+  // subscription is being abused - required by the spec, not shown to users.
+  VAPID_SUBJECT: z.string().default("mailto:ashtonchan01@gmail.com"),
+  PUSH_SUBSCRIPTIONS_PATH: z.string().default(".push-subscriptions.json"),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -118,5 +128,12 @@ export const config = {
     telemetryChargingStaleMs: env.TESLA_TELEMETRY_CHARGING_STALE_MS!,
     telemetryRecoveryPollMs: env.TESLA_TELEMETRY_RECOVERY_POLL_MS!,
     rateLimitCooldownMs: env.TESLA_RATE_LIMIT_COOLDOWN_MS!,
+  },
+
+  push: {
+    publicKey: env.VAPID_PUBLIC_KEY || undefined,
+    privateKey: env.VAPID_PRIVATE_KEY || undefined,
+    subject: env.VAPID_SUBJECT,
+    subscriptionsPath: env.PUSH_SUBSCRIPTIONS_PATH,
   },
 };

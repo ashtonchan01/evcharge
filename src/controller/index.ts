@@ -421,6 +421,10 @@ export class ChargeController extends EventEmitter {
       log.info({ vehicleTag: this.status.vehicleTag }, "Charge complete - turning off solar charging automation");
       this.status.decision = "idle";
       this.status.targetAmps = null;
+      this.emit("notify", {
+        title: "Charging complete",
+        body: `${this.status.vehicleTag} finished charging at ${Math.round(vehicle.batteryLevel)}%. Solar charging turned off.`,
+      });
       this.setEnabled(false, "auto:charge-complete");
       return;
     }

@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
 import { ChargeController } from "../controller/index.js";
 import { TeslaFleetClient } from "../tesla/client.js";
+import { PushService } from "../push/index.js";
 import { logger } from "../util/logger.js";
 
 const log = logger.child({ module: "server" });
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export function createApp(controller: ChargeController, tesla: TeslaFleetClient) {
+export function createApp(controller: ChargeController, tesla: TeslaFleetClient, push: PushService) {
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(__dirname, "../../web/public")));
@@ -64,11 +65,35 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient)
     res.json(controller.getStatus());
   });
 
+  app.get("/api/push/public-key", (_req, res) => {
+    res.json({ publicKey: push.getPublicKey(), enabled: push.isEnabled() });
+  });
+
+  app.post("/api/push/subscribe", (req, res) => {
+    const sub = req.body;
+    if (!sub || typeof sub.endpoint !== "string") {
+      res.status(400).json({ error: "invalid push subscription" });
+      return;
+    }
+    push.addSubscription(sub);
+    res.json({ ok: true });
+  });
+
+  app.post("/api/push/unsubscribe", (req, res) => {
+    const { endpoint } = req.body as { endpoint?: string };
+    if (typeof endpoint !== "string") {
+      res.status(400).json({ error: "endpoint must be a string" });
+      return;
+    }
+    push.removeSubscription(endpoint);
+    res.json({ ok: true });
+  });
+
   return app;
 }
 
-export function startServer(controller: ChargeController, tesla: TeslaFleetClient) {
-  const app = createApp(controller, tesla);
+export function startServer(controller: ChargeController, tesla: TeslaFleetClient, push: PushService) {
+  const app = createApp(controller, tesla, push);
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
@@ -80,6 +105,9 @@ export function startServer(controller: ChargeController, tesla: TeslaFleetClien
   };
 
   controller.on("update", broadcast);
+  controller.on("notify", (payload) => {
+    void push.notify(payload);
+  });
 
   wss.on("connection", (ws) => {
     ws.send(JSON.stringify({ type: "status", data: controller.getStatus() }));
