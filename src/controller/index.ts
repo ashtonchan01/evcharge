@@ -395,11 +395,17 @@ export class ChargeController extends EventEmitter {
       return;
     }
 
+    // Mirrors the "Complete" handling below: once the car is unplugged
+    // there's nothing left for solar charging to do until it's plugged back
+    // in, so turn the automation off instead of leaving it idling and still
+    // paying for telemetry/poll cycles against a car that isn't there.
     if (!vehicle.pluggedIn) {
+      log.info({ vehicleTag: this.status.vehicleTag }, "Vehicle unplugged - turning off solar charging automation");
       this.status.decision = "idle";
       this.status.targetAmps = null;
       this.aboveStartThresholdCount = 0;
       this.belowStopThresholdCount = 0;
+      this.setEnabled(false, "auto:unplugged");
       return;
     }
 
