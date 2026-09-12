@@ -253,3 +253,13 @@ you switch which single vehicle the controller actively manages - it
 controls one car at a time, not both simultaneously. Selecting a vehicle
 calls `POST /api/vehicle` with `{ "tag": "<VIN>" }`, and resets the
 stability counters so the newly selected car is evaluated fresh.
+
+## Charge limit
+
+The Vehicle card has a slider/input to set the car's own charge-limit
+percentage (50-100%) directly on the vehicle - the same setting as the
+Tesla app's charge limit slider, not something evcharge tracks
+separately. It calls `POST /api/charge-limit` with `{ "percent": <50-100> }`.
+Once the vehicle reports `charging_state: "Complete"` (it hit that limit),
+the controller already turns solar-charging automation off automatically
+(see the charge-complete auto-off behavior above).

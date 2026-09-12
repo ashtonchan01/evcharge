@@ -89,6 +89,24 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
     res.json({ ok: true });
   });
 
+  app.post("/api/charge-limit", async (req, res) => {
+    const { percent } = req.body as { percent?: number };
+
+    if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 50 || percent > 100) {
+      res.status(400).json({ error: "percent must be a number between 50 and 100" });
+      return;
+    }
+
+    try {
+      await tesla.setChargeLimit(percent);
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+
+    res.json(controller.getStatus());
+  });
+
   return app;
 }
 

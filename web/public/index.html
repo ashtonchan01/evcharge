@@ -85,7 +85,17 @@
           <dt>Plugged in</dt><dd id="plugged">–</dd>
           <dt>Charging state</dt><dd id="charging-state">–</dd>
           <dt>Charge amps</dt><dd id="amps">–</dd>
+          <dt>Charge limit</dt><dd id="charge-limit">–</dd>
         </dl>
+        <form id="charge-limit-form" class="buffer-row">
+          <label for="charge-limit-range">Set charge limit</label>
+          <div class="buffer-controls">
+            <input id="charge-limit-range" type="range" min="50" max="100" step="5" value="80" />
+            <input id="charge-limit-input" type="number" min="50" max="100" step="1" placeholder="80" />
+            <span class="buffer-unit">%</span>
+            <button type="submit">Set</button>
+          </div>
+        </form>
       </div>
 
       <div class="card card-accent-violet">

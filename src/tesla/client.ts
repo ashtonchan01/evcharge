@@ -279,6 +279,11 @@ export class TeslaFleetClient {
     await this.command("set_charging_amps", { charging_amps: Math.round(amps) });
   }
 
+  async setChargeLimit(percent: number): Promise<void> {
+    log.info({ percent }, "Sending set_charge_limit");
+    await this.command("set_charge_limit", { percent: Math.round(percent) });
+  }
+
   /** Wakes the vehicle if it's asleep. Fleet commands fail silently otherwise. */
   async wakeUp(): Promise<void> {
     log.info("Sending wake_up");
