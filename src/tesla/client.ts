@@ -78,6 +78,12 @@ export class TeslaFleetClient {
   private readonly proxyAgent = new https.Agent({ rejectUnauthorized: false });
 
   private refreshToken: string;
+  // VINs already known (from a prior 403) to require the signed-command
+  // proxy for commands - every command after the first failure skips the
+  // doomed direct attempt entirely, since Tesla bills each attempt
+  // separately and a vehicle's protocol requirement never changes at
+  // runtime.
+  private readonly vehiclesRequiringProxy = new Set<string>();
 
   constructor(
     baseUrl: string,
@@ -216,12 +222,25 @@ export class TeslaFleetClient {
 
   private async command(name: string, body?: unknown): Promise<void> {
     const path = `/api/1/vehicles/${this.vehicleTag}/command/${name}`;
+
+    if (this.commandProxyUrl && this.vehiclesRequiringProxy.has(this.vehicleTag)) {
+      await this.request("POST", path, body ?? {}, {
+        baseUrl: this.commandProxyUrl,
+        agent: this.proxyAgent,
+      });
+      return;
+    }
+
     try {
       await this.request("POST", path, body ?? {});
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (this.commandProxyUrl && message.includes("Vehicle Command Protocol required")) {
-        log.info("Direct command rejected - retrying via signed-command proxy");
+        log.info(
+          { vehicleTag: this.vehicleTag },
+          "Direct command rejected - retrying via signed-command proxy and remembering this vehicle needs it"
+        );
+        this.vehiclesRequiringProxy.add(this.vehicleTag);
         await this.request("POST", path, body ?? {}, {
           baseUrl: this.commandProxyUrl,
           agent: this.proxyAgent,
