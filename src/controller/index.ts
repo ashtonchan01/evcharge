@@ -203,6 +203,12 @@ export class ChargeController extends EventEmitter {
     }
     this.status.rateLimitedUntil = null;
 
+    if (this.isWithinQuietHours(now)) {
+      // Hard overnight blackout: no reads, no wake_up, no commands at all,
+      // regardless of override/telemetry state - see config.ts QUIET_HOURS_*.
+      return this.lastPolledVehicle;
+    }
+
     const vin = this.tesla.getVehicleTag();
     const hint = this.telemetry?.getHint(vin);
 
@@ -327,6 +333,40 @@ export class ChargeController extends EventEmitter {
     };
   }
 
+  /**
+   * True during the configured overnight window (e.g. 19:00-07:00
+   * Australia/Sydney), computed in QUIET_HOURS_TIMEZONE rather than the
+   * server's own clock (typically UTC on a cloud VM). Unset QUIET_HOURS_START
+   * disables the feature entirely (always false).
+   */
+  private isWithinQuietHours(now: number): boolean {
+    if (!config.tesla.quietHoursStart || !config.tesla.quietHoursEnd) return false;
+
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: config.tesla.quietHoursTimezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(new Date(now));
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+    const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+    const nowMinutes = hour * 60 + minute;
+
+    const [startH, startM] = config.tesla.quietHoursStart.split(":").map(Number);
+    const [endH, endM] = config.tesla.quietHoursEnd.split(":").map(Number);
+    const startMinutes = startH * 60 + startM;
+    const endMinutes = endH * 60 + endM;
+
+    if (startMinutes === endMinutes) return false;
+    if (startMinutes < endMinutes) {
+      // Same-day window (e.g. 09:00-17:00).
+      return nowMinutes >= startMinutes && nowMinutes < endMinutes;
+    }
+    // Wraps midnight (e.g. 19:00-07:00).
+    return nowMinutes >= startMinutes || nowMinutes < endMinutes;
+  }
+
   private async pollDirect(opts: { wakeOnFailure: boolean }): Promise<VehicleChargeState | null> {
     this.lastFallbackAttemptAt = Date.now();
     try {
@@ -365,6 +405,14 @@ export class ChargeController extends EventEmitter {
   }
 
   private async decide(surplusW: number, vehicle: VehicleChargeState | null, solarStale: boolean): Promise<void> {
+    if (this.isWithinQuietHours(Date.now())) {
+      // Mirrors resolveVehicleState's blackout - never issue a command
+      // (stop/start/set-amps) during quiet hours either, off cached state.
+      this.status.decision = "idle";
+      this.status.targetAmps = null;
+      return;
+    }
+
     if (Date.now() < this.rateLimitedUntil) {
       // Don't issue commands (stop/start/set-amps) off a stale cached
       // vehicle reading either - those are Tesla calls too, and firing

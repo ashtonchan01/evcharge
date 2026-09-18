@@ -72,6 +72,17 @@ const schema = z.object({
   // rate limit doesn't clear by retrying sooner and every retry just adds
   // to whatever got it disabled in the first place.
   TESLA_RATE_LIMIT_COOLDOWN_MS: numeric().default("1800000"),
+  // Optional overnight window where the controller never contacts Tesla at
+  // all (no polls, no wake_up, no commands) - the car is just sitting
+  // there unplugged-from-solar-purposes, so there's nothing to check.
+  // 24h "HH:MM" in QUIET_HOURS_TIMEZONE. Leave QUIET_HOURS_START unset to
+  // disable (always check Tesla, subject to the usual telemetry/recovery
+  // throttling).
+  QUIET_HOURS_START: z.string().optional(),
+  QUIET_HOURS_END: z.string().optional(),
+  // IANA zone name (e.g. "Australia/Sydney") - the server's own clock is
+  // typically UTC (cloud VM), which isn't what "7pm" means to a person.
+  QUIET_HOURS_TIMEZONE: z.string().default("Australia/Sydney"),
 
   // Web Push (browser notifications, e.g. "charging complete"). Optional -
   // leave unset to disable the feature entirely. Generate with
@@ -128,6 +139,9 @@ export const config = {
     telemetryChargingStaleMs: env.TESLA_TELEMETRY_CHARGING_STALE_MS!,
     telemetryRecoveryPollMs: env.TESLA_TELEMETRY_RECOVERY_POLL_MS!,
     rateLimitCooldownMs: env.TESLA_RATE_LIMIT_COOLDOWN_MS!,
+    quietHoursStart: env.QUIET_HOURS_START || undefined,
+    quietHoursEnd: env.QUIET_HOURS_END || undefined,
+    quietHoursTimezone: env.QUIET_HOURS_TIMEZONE,
   },
 
   push: {
