@@ -1,8 +1,10 @@
 import fetch from "cross-fetch";
 import fs from "node:fs";
 import https from "node:https";
+import { chargeLimitCommandBody } from "../chargeLimit.js";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
+import { teslaCommandFailureReason } from "./commandResult.js";
 
 const log = logger.child({ module: "tesla" });
 
@@ -220,19 +222,17 @@ export class TeslaFleetClient {
     return parsed as T;
   }
 
-  private async command(name: string, body?: unknown): Promise<void> {
+  private async command(name: string, body?: unknown): Promise<unknown> {
     const path = `/api/1/vehicles/${this.vehicleTag}/command/${name}`;
+    const send = (baseUrl?: string, agent?: https.Agent) =>
+      this.request<unknown>("POST", path, body ?? {}, baseUrl ? { baseUrl, agent } : undefined);
 
     if (this.commandProxyUrl && this.vehiclesRequiringProxy.has(this.vehicleTag)) {
-      await this.request("POST", path, body ?? {}, {
-        baseUrl: this.commandProxyUrl,
-        agent: this.proxyAgent,
-      });
-      return;
+      return send(this.commandProxyUrl, this.proxyAgent);
     }
 
     try {
-      await this.request("POST", path, body ?? {});
+      return await send();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (this.commandProxyUrl && message.includes("Vehicle Command Protocol required")) {
@@ -241,11 +241,7 @@ export class TeslaFleetClient {
           "Direct command rejected - retrying via signed-command proxy and remembering this vehicle needs it"
         );
         this.vehiclesRequiringProxy.add(this.vehicleTag);
-        await this.request("POST", path, body ?? {}, {
-          baseUrl: this.commandProxyUrl,
-          agent: this.proxyAgent,
-        });
-        return;
+        return send(this.commandProxyUrl, this.proxyAgent);
       }
       throw err;
     }
@@ -299,8 +295,17 @@ export class TeslaFleetClient {
   }
 
   async setChargeLimit(percent: number): Promise<void> {
-    log.info({ percent }, "Sending set_charge_limit");
-    await this.command("set_charge_limit", { percent: Math.round(percent) });
+    // Fleet API and tesla-http-proxy both take `{ percent }` as an integer
+    // from 50 to 100. HTTP 200 does not mean the car accepted it — a
+    // rejection is `response.result: false` plus `reason` (or legacy `string`).
+    const body = chargeLimitCommandBody(percent);
+    log.info({ percent: body.percent }, "Sending set_charge_limit");
+    const parsed = await this.command("set_charge_limit", body);
+    const failure = teslaCommandFailureReason("set_charge_limit", parsed);
+    if (failure) {
+      log.warn({ percent: body.percent, failure }, "Tesla rejected set_charge_limit");
+      throw new TeslaApiError(failure, 200);
+    }
   }
 
   /** Wakes the vehicle if it's asleep. Fleet commands fail silently otherwise. */

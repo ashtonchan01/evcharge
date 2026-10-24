@@ -11,12 +11,17 @@ function fmtTime(iso) {
   return d.toLocaleTimeString();
 }
 
-function flash(id, msg) {
+function flash(id, msg, opts) {
   const el = $(id);
+  if (!el) return;
   el.textContent = msg;
+  el.classList.toggle("error", Boolean(opts && opts.error));
   setTimeout(() => {
-    if (el.textContent === msg) el.textContent = "";
-  }, 4000);
+    if (el.textContent === msg) {
+      el.textContent = "";
+      el.classList.remove("error");
+    }
+  }, (opts && opts.ms) || 4000);
 }
 
 function setText(id, text) {
@@ -25,6 +30,7 @@ function setText(id, text) {
 }
 
 let nextPollAt = null;
+let chargeLimitPending = false;
 
 function tickCountdown() {
   if (!nextPollAt) {
@@ -92,6 +98,7 @@ function render(status) {
   const chargeLimitInput = $("charge-limit-input");
   const chargeLimitRange = $("charge-limit-range");
   if (
+    !chargeLimitPending &&
     v &&
     v.chargeLimitSoc &&
     document.activeElement !== chargeLimitInput &&
@@ -286,27 +293,46 @@ $("charge-limit-input").addEventListener("input", (e) => {
 
 $("charge-limit-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const percent = Number($("charge-limit-input").value);
+  const raw = Number($("charge-limit-input").value);
+  const percent = Math.round(raw);
+  const button = e.target.querySelector("button");
 
-  if (!Number.isFinite(percent) || percent < 50 || percent > 100) {
-    flash("override-message", "Charge limit must be between 50 and 100.");
+  if (!Number.isFinite(raw) || raw < 50 || raw > 100 || percent < 50 || percent > 100) {
+    flash("charge-limit-message", "Charge limit must be between 50 and 100.", { error: true });
     return;
   }
 
-  const res = await fetch("/api/charge-limit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ percent }),
-  });
-
-  if (!res.ok) {
+  chargeLimitPending = true;
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch("/api/charge-limit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ percent }),
+    });
     const body = await res.json().catch(() => ({}));
-    flash("override-message", `Error: ${body.error || res.status}`);
-    return;
-  }
 
-  render(await res.json());
-  flash("override-message", `Charge limit set to ${percent}%.`);
+    if (!res.ok) {
+      flash("charge-limit-message", body.error || `Couldn't set charge limit (${res.status}).`, {
+        error: true,
+        ms: 8000,
+      });
+      return;
+    }
+
+    render(body);
+    const shown =
+      body.vehicle && body.vehicle.chargeLimitSoc ? Math.round(body.vehicle.chargeLimitSoc) : percent;
+    setText("charge-limit", `${shown}%`);
+    $("charge-limit-input").value = shown;
+    $("charge-limit-range").value = shown;
+    flash("charge-limit-message", `Charge limit set to ${shown}%.`);
+  } catch (err) {
+    flash("charge-limit-message", `Couldn't set charge limit: ${err.message || err}`, { error: true, ms: 8000 });
+  } finally {
+    chargeLimitPending = false;
+    if (button) button.disabled = false;
+  }
 });
 
 function connectWs() {

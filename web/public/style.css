@@ -474,7 +474,10 @@ label {
 
 #enabled-label { font-weight: 600; }
 
-#override-message { min-height: 1.2em; font-size: 0.9rem; color: var(--muted); }
+#override-message,
+#charge-limit-message { min-height: 1.2em; font-size: 0.9rem; color: var(--muted); }
+#charge-limit-message { margin: 8px 0 0; }
+#charge-limit-message.error { color: var(--bad); }
 
 @media (max-width: 480px) {
   main { padding-top: calc(16px + env(safe-area-inset-top)); }

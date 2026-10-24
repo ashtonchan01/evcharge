@@ -84,6 +84,11 @@ export class ChargeController extends EventEmitter {
   // retrying every cycle into an account-level block that retrying won't
   // clear any faster.
   private rateLimitedUntil = 0;
+  // Charge limit just accepted by the car. Telemetry's ChargeLimitSoc is
+  // pushed on a long interval, and an in-flight poll can still be holding
+  // the previous percent — keep showing the commanded value until a
+  // ChargeLimitSoc observation (or a vehicle_data poll) from after `at`.
+  private commandedChargeLimit: { percent: number; at: number } | null = null;
 
   constructor(
     private readonly goodwe: GoodweSemsClient,
@@ -140,6 +145,46 @@ export class ChargeController extends EventEmitter {
     this.emitUpdate();
   }
 
+  /**
+   * Call after Tesla accepts set_charge_limit. Updates the cached vehicle
+   * and the telemetry hint so the dashboard doesn't keep rendering the
+   * previous chargeLimitSoc (the command response does not include it).
+   */
+  noteChargeLimit(percent: number): void {
+    const rounded = Math.round(percent);
+    this.commandedChargeLimit = { percent: rounded, at: Date.now() };
+    this.telemetry?.noteChargeLimit(this.tesla.getVehicleTag(), rounded);
+    this.patchDisplayedChargeLimit(rounded);
+    this.emitUpdate();
+  }
+
+  private patchDisplayedChargeLimit(percent: number): void {
+    if (this.status.vehicle) {
+      this.status.vehicle = { ...this.status.vehicle, chargeLimitSoc: percent };
+    }
+    if (this.lastPolledVehicle) {
+      this.lastPolledVehicle = { ...this.lastPolledVehicle, chargeLimitSoc: percent };
+    }
+  }
+
+  /**
+   * A tick that started before noteChargeLimit can assign a vehicle
+   * snapshot that still says the old percent. Put the commanded value
+   * back unless the car has reported ChargeLimitSoc since the command.
+   */
+  private reapplyCommandedChargeLimit(): void {
+    const cmd = this.commandedChargeLimit;
+    if (!cmd) return;
+
+    const hint = this.telemetry?.getHint(this.tesla.getVehicleTag());
+    if (hint?.chargeLimitObservedAt && hint.chargeLimitObservedAt.getTime() > cmd.at) {
+      this.commandedChargeLimit = null;
+      return;
+    }
+
+    this.patchDisplayedChargeLimit(cmd.percent);
+  }
+
   private emitUpdate(): void {
     this.emit("update", this.status);
   }
@@ -177,6 +222,7 @@ export class ChargeController extends EventEmitter {
       log.error({ err: this.status.lastError }, "Poll cycle failed");
     }
 
+    this.reapplyCommandedChargeLimit();
     this.emitUpdate();
   }
 
@@ -368,11 +414,20 @@ export class ChargeController extends EventEmitter {
   }
 
   private async pollDirect(opts: { wakeOnFailure: boolean }): Promise<VehicleChargeState | null> {
-    this.lastFallbackAttemptAt = Date.now();
+    const startedAt = Date.now();
+    this.lastFallbackAttemptAt = startedAt;
     try {
       const vehicle = await this.tesla.getChargeState();
       this.lastPolledVehicle = vehicle;
       this.consecutiveFailures = 0;
+      // A poll that started after set_charge_limit has the car's real
+      // charge_limit_soc. Trust it and stop holding the commanded value.
+      // A poll that was already in flight does not — its snapshot predates
+      // the command.
+      if (this.commandedChargeLimit && startedAt > this.commandedChargeLimit.at) {
+        this.telemetry?.noteObservedChargeLimit(this.tesla.getVehicleTag(), vehicle.chargeLimitSoc);
+        this.commandedChargeLimit = null;
+      }
       // Backfill telemetry's chargingState/pluggedIn from this authoritative
       // read if telemetry hasn't reported them yet (see the post-restart
       // gap explained in resolveVehicleState) - lets subsequent cycles use
