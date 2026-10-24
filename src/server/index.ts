@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseChargeLimitPercent } from "../chargeLimit.js";
 import { config } from "../config.js";
 import { ChargeController } from "../controller/index.js";
 import { TeslaFleetClient } from "../tesla/client.js";
@@ -90,20 +91,24 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
   });
 
   app.post("/api/charge-limit", async (req, res) => {
-    const { percent } = req.body as { percent?: number };
+    const parsed = parseChargeLimitPercent((req.body as { percent?: unknown } | undefined)?.percent);
 
-    if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 50 || percent > 100) {
-      res.status(400).json({ error: "percent must be a number between 50 and 100" });
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
       return;
     }
 
     try {
-      await tesla.setChargeLimit(percent);
+      await tesla.setChargeLimit(parsed.percent);
     } catch (err) {
       res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
       return;
     }
 
+    // getStatus() still holds the previous chargeLimitSoc until the next
+    // telemetry push (ChargeLimitSoc is on a long interval). Patch it so
+    // the response and the websocket broadcast show the value just set.
+    controller.noteChargeLimit(parsed.percent);
     res.json(controller.getStatus());
   });
 

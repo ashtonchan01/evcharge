@@ -25,6 +25,13 @@ export interface TelemetryHint {
   /** Real AC charging power in watts, converted from Tesla's ACChargingPower (kW). */
   chargerPowerW: number;
   chargeLimitSoc: number;
+  /**
+   * When ChargeLimitSoc itself was last present in a telemetry line (or an
+   * authoritative vehicle_data poll). Distinct from lastSeenAt, which moves
+   * on any field. A dashboard set_charge_limit must not be overwritten by a
+   * stale cached percent just because Soc updated.
+   */
+  chargeLimitObservedAt: Date | null;
   lastSeenAt: Date;
   chargingDataLastSeenAt: Date | null;
 }
@@ -164,6 +171,31 @@ export class TelemetryIngest extends EventEmitter {
     this.byVin.set(vin, { ...prior, chargingState, pluggedIn });
   }
 
+  /**
+   * Remember a charge limit we just commanded, without pretending the car
+   * has confirmed it. Later lines that omit ChargeLimitSoc keep this value;
+   * a line that includes ChargeLimitSoc replaces it and stamps
+   * chargeLimitObservedAt.
+   */
+  noteChargeLimit(vin: string, percent: number): void {
+    this.patchChargeLimit(vin, percent, false);
+  }
+
+  /** An authoritative reading (telemetry field or post-command vehicle_data poll). */
+  noteObservedChargeLimit(vin: string, percent: number): void {
+    this.patchChargeLimit(vin, percent, true);
+  }
+
+  private patchChargeLimit(vin: string, percent: number, observed: boolean): void {
+    const prior = this.byVin.get(vin);
+    if (!prior) return;
+    this.byVin.set(vin, {
+      ...prior,
+      chargeLimitSoc: percent,
+      chargeLimitObservedAt: observed ? new Date() : prior.chargeLimitObservedAt,
+    });
+  }
+
   private handleLine(line: string): void {
     const parsed = extractVehicleFields(line);
     if (!parsed) return;
@@ -212,6 +244,7 @@ export class TelemetryIngest extends EventEmitter {
       chargeAmps: typeof chargeAmps === "number" ? chargeAmps : prior?.chargeAmps ?? 0,
       chargerPowerW: typeof acChargingPowerKw === "number" ? acChargingPowerKw * 1000 : prior?.chargerPowerW ?? 0,
       chargeLimitSoc: typeof chargeLimitSoc === "number" ? chargeLimitSoc : prior?.chargeLimitSoc ?? 0,
+      chargeLimitObservedAt: typeof chargeLimitSoc === "number" ? now : prior?.chargeLimitObservedAt ?? null,
       lastSeenAt: now,
       chargingDataLastSeenAt: hasChargingData ? now : prior?.chargingDataLastSeenAt ?? null,
     };
