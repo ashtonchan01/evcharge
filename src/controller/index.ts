@@ -4,6 +4,15 @@ import { GoodweSemsClient, SolarSnapshot } from "../goodwe/client.js";
 import { TeslaApiError, TeslaFleetClient, VehicleChargeState } from "../tesla/client.js";
 import { TelemetryHint, TelemetryIngest } from "../tesla/telemetry.js";
 import { logger } from "../util/logger.js";
+import {
+  ampCommandNeeded,
+  budgetBlocksPaidCalls,
+  classifyTeslaBlock,
+  commandGapElapsed,
+  planRecovery,
+  RecoveryPlan,
+  TeslaWait,
+} from "./teslaRecovery.js";
 
 const log = logger.child({ module: "controller" });
 
@@ -34,6 +43,14 @@ export interface ControllerStatus {
   telemetryEnabled: boolean;
   telemetryLastSeenAt: Date | null;
   rateLimitedUntil: Date | null;
+  /** When the next Tesla read, wake, or budget/rate-limit hold ends. */
+  nextTeslaAttemptAt: Date | null;
+  /** Why the car isn't being commanded, for the dashboard. */
+  teslaWait: TeslaWait;
+  /** True while paid Fleet API calls are paused for a billing cap (or mode=on). */
+  apiBudgetActive: boolean;
+  /** Short non-error note, e.g. a command that was skipped because it repeated. */
+  statusNote: string | null;
 }
 
 /**
@@ -57,6 +74,10 @@ export class ChargeController extends EventEmitter {
     telemetryEnabled: false,
     telemetryLastSeenAt: null,
     rateLimitedUntil: null,
+    nextTeslaAttemptAt: null,
+    teslaWait: config.tesla.apiBudgetMode === "on" ? "budget" : "none",
+    apiBudgetActive: config.tesla.apiBudgetMode === "on",
+    statusNote: null,
   };
 
   private timer: NodeJS.Timeout | null = null;
@@ -74,11 +95,26 @@ export class ChargeController extends EventEmitter {
   // just be waking up) before backing off to the same slow recovery cadence
   // used when telemetry is merely stale, even with solar charging on.
   private consecutiveFailures = 0;
-  private static readonly MAX_UNTHROTTLED_RETRIES = 3;
-  // Wall-clock companion bound to MAX_UNTHROTTLED_RETRIES (see
-  // resolveVehicleState) - reset whenever override is turned on.
-  private unthrottledGraceStartedAt = 0;
-  private static readonly UNTHROTTLED_GRACE_WINDOW_MS = 2 * 60 * 1000;
+  /**
+   * False when this cycle has no fresh telemetry hint and no successful
+   * poll. decide() must not send charge commands off a stale "Stopped"
+   * snapshot — that loop is what produced thousands of billed commands
+   * while the car's reported state lagged.
+   */
+  private haveFreshControlState = false;
+  private tickInFlight = false;
+  /** User turned solar on. One vehicle_data/wake is allowed inside the slow gap. */
+  private sessionProbePending = false;
+  /** User turned solar on during a billing hold. One paid bundle, then pause again. */
+  private sessionCredit = false;
+  /** True after the credit is consumed, until this tick finishes. */
+  private sessionBundleOpen = false;
+  /** auto-mode billing hold end. 0 = none. Forced `on` does not need this. */
+  private budgetUntil = 0;
+  private lastStartCommandAt = 0;
+  private lastStopCommandAt = 0;
+  private lastAmpCommandAt = 0;
+  private lastCommandedAmps: number | null = null;
   // Set on a 403/429 from Tesla - a hard signal to stop calling Tesla
   // entirely (reads, commands, wake_up) until this time, rather than
   // retrying every cycle into an account-level block that retrying won't
@@ -101,6 +137,7 @@ export class ChargeController extends EventEmitter {
   }
 
   getStatus(): ControllerStatus {
+    this.status.apiBudgetActive = this.budgetHoldActive();
     return this.status;
   }
 
@@ -109,6 +146,58 @@ export class ChargeController extends EventEmitter {
     log.info({ intervalMs: config.pollIntervalMs }, "Starting control loop");
     void this.tick();
     this.timer = setInterval(() => void this.tick(), config.pollIntervalMs);
+  }
+
+  /**
+   * Tesla returned 403 or 429. Stop every Tesla call (reads, wake_up,
+   * commands, vehicle list) until the cooldown ends. A later call cannot
+   * shorten a cooldown that's already running — retrying sooner is what
+   * extended the July 2026 account block.
+   */
+  noteRateLimit(source: string): void {
+    const until = Date.now() + config.tesla.rateLimitCooldownMs;
+    if (until <= this.rateLimitedUntil) return;
+    this.rateLimitedUntil = until;
+    this.haveFreshControlState = false;
+    this.sessionCredit = false;
+    this.sessionBundleOpen = false;
+    this.sessionProbePending = false;
+    log.error(
+      { source, cooldownMs: config.tesla.rateLimitCooldownMs, until: new Date(until) },
+      "Tesla rejected the request with 403/429 - pausing ALL Tesla calls (reads, commands, wake_up) for the cooldown period"
+    );
+    this.publishBlockStatus();
+    this.emitUpdate();
+  }
+
+  /**
+   * Billing-cap / HTTP 402. Longer hold than 403/429. Does not shorten an
+   * existing 403 cooldown — callers still invoke noteRateLimit for 403/429.
+   */
+  noteBillingLimit(source: string): void {
+    if (config.tesla.apiBudgetMode === "off") {
+      log.error({ source }, "Tesla billing-cap response ignored because TESLA_API_BUDGET_MODE=off");
+      return;
+    }
+    const until = Date.now() + config.tesla.apiBudgetCooldownMs;
+    if (until > this.budgetUntil) this.budgetUntil = until;
+    this.sessionCredit = false;
+    this.sessionBundleOpen = false;
+    this.sessionProbePending = false;
+    this.haveFreshControlState = false;
+    log.error(
+      { source, cooldownMs: config.tesla.apiBudgetCooldownMs, until: new Date(this.budgetUntil) },
+      "Tesla billing cap — pausing paid Fleet API calls"
+    );
+    this.publishBlockStatus();
+    this.emitUpdate();
+  }
+
+  /** Classify a Tesla client error and apply the matching hold. */
+  observeTeslaError(source: string, err: unknown): void {
+    if (!(err instanceof TeslaApiError)) return;
+    if (err.status === 403 || err.status === 429) this.noteRateLimit(source);
+    if (classifyTeslaBlock(err.status, err.message) === "billing") this.noteBillingLimit(source);
   }
 
   stop(): void {
@@ -122,10 +211,18 @@ export class ChargeController extends EventEmitter {
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
     if (enabled) {
-      this.consecutiveFailures = 0;
-      this.unthrottledGraceStartedAt = Date.now();
+      // One explicit session attempt. Does not clear the 5 minute gaps, so
+      // steady-state poll/wake/command rates stay where they were — except
+      // this single probe, which is allowed inside the gap.
+      this.sessionCredit = true;
+      this.sessionProbePending = true;
+      this.explicitSession = true;
+    } else {
+      this.sessionCredit = false;
+      this.sessionProbePending = false;
     }
     this.emitUpdate();
+    if (enabled) void this.tick();
   }
 
   setGridImportBufferW(bufferW: number, setBy: string): void {
@@ -142,7 +239,17 @@ export class ChargeController extends EventEmitter {
     this.status.decision = "unavailable";
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
+    this.lastPolledVehicle = null;
+    this.haveFreshControlState = false;
+    this.consecutiveFailures = 0;
+    this.lastCommandedAmps = null;
+    if (this.status.override.enabled) {
+      this.sessionCredit = true;
+      this.sessionProbePending = true;
+      this.explicitSession = true;
+    }
     this.emitUpdate();
+    if (this.status.override.enabled) void this.tick();
   }
 
   /**
@@ -190,11 +297,16 @@ export class ChargeController extends EventEmitter {
   }
 
   private async tick(): Promise<void> {
+    if (this.tickInFlight) return;
+    this.tickInFlight = true;
     try {
       const [solar, vehicle] = await Promise.all([this.goodwe.getSnapshot(), this.resolveVehicleState()]);
 
       this.status.solar = solar;
-      this.status.vehicle = vehicle;
+      // Keep the last known charge snapshot on screen when this cycle
+      // couldn't reach the car, so the picker and "Stopped / plugged in"
+      // don't flash blank. decide() is still given null in that case.
+      this.status.vehicle = vehicle ?? this.lastPolledVehicle;
       this.status.lastPollAt = new Date();
       this.status.lastError = null;
 
@@ -215,11 +327,16 @@ export class ChargeController extends EventEmitter {
       const surplusW = solar.pvPowerW - solar.loadPowerW - this.status.gridImportBufferW;
       this.status.surplusW = surplusW;
 
-      await this.decide(surplusW, vehicle, solarStale);
+      const controlVehicle = this.haveFreshControlState ? (vehicle ?? this.lastPolledVehicle) : null;
+      await this.decide(surplusW, controlVehicle, solarStale);
     } catch (err) {
       this.status.lastError = err instanceof Error ? err.message : String(err);
       this.status.decision = "unavailable";
       log.error({ err: this.status.lastError }, "Poll cycle failed");
+    } finally {
+      this.sessionBundleOpen = false;
+      this.explicitSession = false;
+      this.tickInFlight = false;
     }
 
     this.reapplyCommandedChargeLimit();
@@ -227,36 +344,27 @@ export class ChargeController extends EventEmitter {
   }
 
   /**
-   * Without telemetry configured, falls back to the original behavior:
-   * poll vehicle_data every cycle, rate-limited wake on failure. With
-   * telemetry configured, that per-cycle Data-category cost only applies
-   * while a charge session is actually active (to get accurate
-   * charger_actual_current/voltage for the ramp math, which telemetry
-   * hints deliberately don't carry - see tesla/telemetry.ts). The rest of
-   * the time - parked, asleep, off-peak - state comes from the pushed
-   * telemetry hint and costs nothing.
+   * Prefer the free telemetry hint. Direct vehicle_data is only on the
+   * slow recovery gap (or one probe when the user just enabled solar).
+   * There is no per-cycle poll while charging-power fields are briefly
+   * stale — that fallback is on the same gap, because Data calls are billed.
    */
   private async resolveVehicleState(): Promise<VehicleChargeState | null> {
     const now = Date.now();
+    const hint = this.telemetry?.getHint(this.tesla.getVehicleTag());
+    const hintFresh = this.isHintFresh(hint, now);
+    this.status.telemetryLastSeenAt = hint?.lastSeenAt ?? null;
 
-    // Hard circuit breaker: Tesla told us to stop (403/429). Every field
-    // below - telemetry hints, override state, "just started charging" -
-    // gets ignored until the cooldown expires, because none of it changes
-    // the fact that retrying now just extends whatever got us blocked.
-    if (now < this.rateLimitedUntil) {
-      this.status.rateLimitedUntil = new Date(this.rateLimitedUntil);
-      return this.lastPolledVehicle;
+    const plan = this.recoveryPlan(now, hintFresh);
+    this.publishTeslaWait(plan);
+
+    if (plan.wait === "rate_limited" || plan.wait === "budget" || plan.wait === "quiet_hours") {
+      this.haveFreshControlState = hintFresh && plan.wait !== "rate_limited";
+      // Budget hold still shows telemetry, but decide() must not command
+      // unless this tick holds the one session credit (armed on the paid call).
+      if (plan.wait !== "budget") this.haveFreshControlState = false;
+      return hintFresh ? this.buildStateFromHint(hint) : this.lastPolledVehicle;
     }
-    this.status.rateLimitedUntil = null;
-
-    if (this.isWithinQuietHours(now)) {
-      // Hard overnight blackout: no reads, no wake_up, no commands at all,
-      // regardless of override/telemetry state - see config.ts QUIET_HOURS_*.
-      return this.lastPolledVehicle;
-    }
-
-    const vin = this.tesla.getVehicleTag();
-    const hint = this.telemetry?.getHint(vin);
 
     if (!this.status.override.enabled) {
       // Fully hands-off: never call Tesla (not even a read/poll) while
@@ -267,17 +375,10 @@ export class ChargeController extends EventEmitter {
       // without SSHing in. Free telemetry (if any) still updates the
       // display; nothing else does. See evcharge_project memory,
       // 2026-07-27.
-      const disabledHintFresh =
-        hint !== undefined &&
-        hint.chargingState !== "Unknown" &&
-        now - hint.lastSeenAt.getTime() <= config.tesla.telemetryStaleMs;
-      this.status.telemetryLastSeenAt = hint?.lastSeenAt ?? null;
-      return disabledHintFresh ? this.buildStateFromHint(hint) : this.lastPolledVehicle;
+      this.haveFreshControlState = hintFresh;
+      return hintFresh ? this.buildStateFromHint(hint) : this.lastPolledVehicle;
     }
 
-    if (!this.telemetry) {
-      return this.pollDirect({ wakeOnFailure: true });
-    }
     // Tesla only pushes DetailedChargeState/ChargePortDoorOpen on *change*,
     // not periodically - so right after a restart (hint map starts empty),
     // a vehicle that's been steadily "Charging" the whole time won't get a
@@ -286,68 +387,222 @@ export class ChargeController extends EventEmitter {
     // change continuously keep refreshing lastSeenAt, which would make a
     // pure time-based check see this as "fresh" despite chargingState still
     // being unknown - requiring a known chargingState too routes that case
-    // into the same poll-fallback below instead of confidently (and
-    // wrongly) treating an actively-charging vehicle as unplugged/idle.
-    const hintFresh =
-      hint !== undefined &&
-      hint.chargingState !== "Unknown" &&
-      now - hint.lastSeenAt.getTime() <= config.tesla.telemetryStaleMs;
-    this.status.telemetryLastSeenAt = hint?.lastSeenAt ?? null;
-
+    // into the poll fallback below instead of treating an actively-charging
+    // vehicle as unplugged/idle.
     if (hintFresh && hint.chargingState === "Charging") {
       const chargingDataFresh =
         hint.chargingDataLastSeenAt !== null &&
         now - hint.chargingDataLastSeenAt.getTime() <= config.tesla.telemetryChargingStaleMs;
+      const chargingPollDue =
+        !chargingDataFresh &&
+        (this.lastFallbackAttemptAt <= 0 || now - this.lastFallbackAttemptAt >= config.tesla.telemetryRecoveryPollMs);
 
-      if (chargingDataFresh) {
-        // Telemetry is delivering real, recent ChargeAmps/ACChargingPower
-        // readings - the ramp loop can run on that instead of polling.
-        return this.buildStateFromHint(hint);
+      if (chargingPollDue && this.armPaidCall()) {
+        const polled = await this.pollDirect();
+        if (Date.now() < this.rateLimitedUntil) {
+          this.haveFreshControlState = false;
+          this.publishBlockStatus();
+          return this.lastPolledVehicle;
+        }
+        if (polled) {
+          this.haveFreshControlState = true;
+          this.status.teslaWait = "none";
+          this.status.nextTeslaAttemptAt = null;
+          return polled;
+        }
       }
 
-      // Charging per telemetry, but the charging-power fields specifically
-      // haven't reported anything recent (session just started and hasn't
-      // caught up yet, or they've gone stale independent of the general
-      // hint). Poll once for authoritative numbers; once telemetry catches
-      // up, subsequent cycles go back to the branch above.
-      const polled = await this.pollDirect({ wakeOnFailure: false });
-      return polled ?? this.lastPolledVehicle;
-    }
-
-    if (hintFresh) {
+      this.haveFreshControlState = true;
+      if (this.status.teslaWait !== "rate_limited" && this.status.teslaWait !== "budget") {
+        this.status.teslaWait = "none";
+        this.status.nextTeslaAttemptAt = null;
+      }
       return this.buildStateFromHint(hint);
     }
 
-    // No hint yet, telemetry has gone quiet, or chargingState specifically
-    // is still unknown (car offline/deep asleep, the ingest pipe itself is
-    // down, this vehicle never established a telemetry connection, or it's
-    // the post-restart gap described above). Rate-limit the recovery poll
-    // so a persistently unreachable vehicle doesn't rack up Data/Wake cost
-    // every 30s.
-    //
-    // Solar charging being on gets a short grace window of full-cadence
-    // retries in case the car is mid-wake and about to answer - but NOT an
-    // indefinite one. Bounded by BOTH a retry count and a wall-clock
-    // window: count alone isn't enough, because a *successful* poll resets
-    // consecutiveFailures to 0, and if chargingState stays unknown for
-    // reasons other than unreachability (the post-restart gap above -
-    // every poll can keep succeeding while telemetry still never reports
-    // the field), count-only would keep the grace window open, and thus
-    // the unthrottled 30s cadence, indefinitely - which is exactly the
-    // hours-long hammering that caused the 2026-07-25 rate-limit incident.
-    // pollDirect() success also seeds the telemetry hint's chargingState
-    // directly, which is the real fix for that gap - this time bound is
-    // defense in depth for whatever isn't covered by that.
-    const dueForRecoveryPoll = now - this.lastFallbackAttemptAt >= config.tesla.telemetryRecoveryPollMs;
-    const withinUnthrottledGrace =
-      this.status.override.enabled &&
-      this.consecutiveFailures < ChargeController.MAX_UNTHROTTLED_RETRIES &&
-      now - this.unthrottledGraceStartedAt < ChargeController.UNTHROTTLED_GRACE_WINDOW_MS;
+    if (hintFresh) {
+      this.haveFreshControlState = true;
+      this.sessionProbePending = false;
+      this.status.teslaWait = "none";
+      this.status.nextTeslaAttemptAt = null;
+      return this.buildStateFromHint(hint);
+    }
 
-    if (!dueForRecoveryPoll && !withinUnthrottledGrace) {
+    return this.pollForRecovery(plan);
+  }
+
+  private isHintFresh(hint: TelemetryHint | undefined, now: number): hint is TelemetryHint {
+    return (
+      hint !== undefined &&
+      hint.chargingState !== "Unknown" &&
+      now - hint.lastSeenAt.getTime() <= config.tesla.telemetryStaleMs
+    );
+  }
+
+  private budgetHoldActive(): boolean {
+    return budgetBlocksPaidCalls({
+      mode: config.tesla.apiBudgetMode,
+      now: Date.now(),
+      budgetUntil: this.budgetUntil,
+      sessionCredit: false,
+      sessionBundleOpen: false,
+    });
+  }
+
+  /** True if a billed call may proceed. Consumes the one-shot session credit. */
+  private armPaidCall(): boolean {
+    if (Date.now() < this.rateLimitedUntil) return false;
+    if (
+      budgetBlocksPaidCalls({
+        mode: config.tesla.apiBudgetMode,
+        now: Date.now(),
+        budgetUntil: this.budgetUntil,
+        sessionCredit: this.sessionCredit,
+        sessionBundleOpen: this.sessionBundleOpen,
+      })
+    ) {
+      return false;
+    }
+    if (this.budgetHoldActive() && this.sessionCredit) {
+      this.sessionCredit = false;
+      this.sessionBundleOpen = true;
+    }
+    return true;
+  }
+
+  private recoveryPlan(now: number, telemetryFresh: boolean): RecoveryPlan {
+    return planRecovery({
+      now,
+      solarEnabled: this.status.override.enabled,
+      telemetryFresh,
+      lastFallbackAttemptAt: this.lastFallbackAttemptAt,
+      lastWakeAttemptAt: this.lastWakeAttemptAt,
+      consecutiveFailures: this.consecutiveFailures,
+      recoveryPollMs: config.tesla.telemetryRecoveryPollMs,
+      rateLimitedUntil: this.rateLimitedUntil,
+      budgetBlocked: budgetBlocksPaidCalls({
+        mode: config.tesla.apiBudgetMode,
+        now,
+        budgetUntil: this.budgetUntil,
+        sessionCredit: this.sessionCredit,
+        sessionBundleOpen: this.sessionBundleOpen,
+      }),
+      sessionProbePending: this.sessionProbePending,
+      quietHours: this.isWithinQuietHours(now),
+      budgetUntil: this.budgetUntil,
+    });
+  }
+
+  private publishBlockStatus(): void {
+    const now = Date.now();
+    const rateUntil = this.rateLimitedUntil > now ? this.rateLimitedUntil : 0;
+    const budget = this.budgetHoldActive();
+    const budgetUntil = budget && this.budgetUntil > now ? this.budgetUntil : 0;
+    this.status.apiBudgetActive = budget;
+    this.status.targetAmps = null;
+    this.haveFreshControlState = false;
+    this.status.decision = "unavailable";
+    this.status.statusNote = null;
+    this.status.rateLimitedUntil = rateUntil ? new Date(rateUntil) : null;
+
+    // Count down to whichever hold actually ends last. A billing pause must
+    // not replace a 403/429 window with a shorter one, and a 403 window must
+    // not hide a longer billing pause.
+    const effectiveUntil = Math.max(rateUntil, budgetUntil);
+    const showBudget = budget && (config.tesla.apiBudgetMode === "on" || budgetUntil >= rateUntil);
+    if (showBudget) {
+      this.status.teslaWait = "budget";
+      this.status.nextTeslaAttemptAt = effectiveUntil > now ? new Date(effectiveUntil) : null;
+      return;
+    }
+    if (rateUntil) {
+      this.status.teslaWait = "rate_limited";
+      this.status.nextTeslaAttemptAt = new Date(rateUntil);
+    }
+  }
+
+  private publishTeslaWait(plan: RecoveryPlan): void {
+    if (plan.wait === "rate_limited" || plan.wait === "budget") {
+      this.publishBlockStatus();
+      if (plan.wait === "budget" && plan.nextAttemptAt) {
+        this.status.nextTeslaAttemptAt = new Date(plan.nextAttemptAt);
+      }
+      return;
+    }
+    if (this.rateLimitedUntil <= Date.now()) this.status.rateLimitedUntil = null;
+    this.status.apiBudgetActive = this.budgetHoldActive();
+    this.status.teslaWait = plan.wait;
+    this.status.nextTeslaAttemptAt = plan.nextAttemptAt === null ? null : new Date(plan.nextAttemptAt);
+  }
+
+  /**
+   * Poll (and maybe wake once) when telemetry has no fresh hint.
+   * haveFreshControlState is true only when this call actually got a reading,
+   * so later ticks don't keep commanding off the cached snapshot.
+   */
+  private async pollForRecovery(plan: RecoveryPlan): Promise<VehicleChargeState | null> {
+    if (!plan.shouldPoll) {
+      this.haveFreshControlState = false;
       return this.lastPolledVehicle;
     }
-    return this.pollDirect({ wakeOnFailure: this.status.override.enabled && this.consecutiveFailures === 0 });
+    if (!this.armPaidCall()) {
+      this.haveFreshControlState = false;
+      this.publishBlockStatus();
+      return this.lastPolledVehicle;
+    }
+
+    this.sessionProbePending = false;
+
+    if (plan.shouldWake) {
+      const woke = await this.wakeOnce();
+      if (!woke && Date.now() < this.rateLimitedUntil) {
+        this.haveFreshControlState = false;
+        this.publishBlockStatus();
+        return this.lastPolledVehicle;
+      }
+    }
+
+    const polled = await this.pollDirect();
+    if (Date.now() < this.rateLimitedUntil || (this.budgetHoldActive() && !this.sessionBundleOpen && !this.sessionCredit)) {
+      if (Date.now() < this.rateLimitedUntil) {
+        this.haveFreshControlState = false;
+        this.publishBlockStatus();
+        return this.lastPolledVehicle;
+      }
+    }
+
+    if (polled) {
+      this.haveFreshControlState = true;
+      this.consecutiveFailures = 0;
+      this.status.teslaWait = "none";
+      this.status.nextTeslaAttemptAt = null;
+      return polled;
+    }
+
+    this.haveFreshControlState = false;
+    const followUp = this.recoveryPlan(Date.now(), false);
+    this.publishTeslaWait(followUp);
+    if (followUp.wait === "none") {
+      this.status.teslaWait = this.lastWakeAttemptAt > 0 ? "waking" : "asleep";
+      this.status.nextTeslaAttemptAt = new Date(Date.now() + config.tesla.telemetryRecoveryPollMs);
+    }
+    return this.lastPolledVehicle;
+  }
+
+  /** One wake_up. The caller already decided it is due. */
+  private async wakeOnce(): Promise<boolean> {
+    if (!this.armPaidCall()) return false;
+    this.lastWakeAttemptAt = Date.now();
+    try {
+      await this.tesla.wakeUp();
+      return true;
+    } catch (err) {
+      this.observeTeslaError("wake_up", err);
+      if (!(err instanceof TeslaApiError) || (err.status !== 403 && err.status !== 429)) {
+        log.debug({ err: String(err) }, "wake_up failed");
+      }
+      return false;
+    }
   }
 
   /**
@@ -413,7 +668,7 @@ export class ChargeController extends EventEmitter {
     return nowMinutes >= startMinutes || nowMinutes < endMinutes;
   }
 
-  private async pollDirect(opts: { wakeOnFailure: boolean }): Promise<VehicleChargeState | null> {
+  private async pollDirect(): Promise<VehicleChargeState | null> {
     const startedAt = Date.now();
     this.lastFallbackAttemptAt = startedAt;
     try {
@@ -436,30 +691,18 @@ export class ChargeController extends EventEmitter {
       return vehicle;
     } catch (err) {
       this.consecutiveFailures += 1;
-
-      if (err instanceof TeslaApiError && (err.status === 403 || err.status === 429)) {
-        this.rateLimitedUntil = Date.now() + config.tesla.rateLimitCooldownMs;
-        this.status.rateLimitedUntil = new Date(this.rateLimitedUntil);
-        log.error(
-          { err: String(err), cooldownMs: config.tesla.rateLimitCooldownMs },
-          "Tesla rejected the request with 403/429 - pausing ALL Tesla calls (reads, commands, wake_up) for the cooldown period"
-        );
+      if (err instanceof TeslaApiError && classifyTeslaBlock(err.status, err.message)) {
+        this.observeTeslaError("vehicle_data", err);
         return null;
       }
 
       log.warn({ err: String(err) }, "Vehicle unreachable this cycle");
-      const now = Date.now();
-      // wake_up is itself billed and only useful once every so often - a
-      // vehicle that's genuinely offline shouldn't get hit every cycle.
-      if (opts.wakeOnFailure && now - this.lastWakeAttemptAt >= config.tesla.telemetryRecoveryPollMs) {
-        this.lastWakeAttemptAt = now;
-        this.tesla.wakeUp().catch((wakeErr) => log.debug({ err: String(wakeErr) }, "wake_up failed"));
-      }
       return null;
     }
   }
 
   private async decide(surplusW: number, vehicle: VehicleChargeState | null, solarStale: boolean): Promise<void> {
+    this.status.statusNote = null;
     if (this.isWithinQuietHours(Date.now())) {
       // Mirrors resolveVehicleState's blackout - never issue a command
       // (stop/start/set-amps) during quiet hours either, off cached state.
@@ -472,8 +715,20 @@ export class ChargeController extends EventEmitter {
       // Don't issue commands (stop/start/set-amps) off a stale cached
       // vehicle reading either - those are Tesla calls too, and firing
       // them into an active cooldown just adds more blocked requests.
-      this.status.decision = "unavailable";
-      this.status.targetAmps = null;
+      this.publishBlockStatus();
+      return;
+    }
+
+    if (
+      budgetBlocksPaidCalls({
+        mode: config.tesla.apiBudgetMode,
+        now: Date.now(),
+        budgetUntil: this.budgetUntil,
+        sessionCredit: this.sessionCredit,
+        sessionBundleOpen: this.sessionBundleOpen,
+      })
+    ) {
+      this.publishBlockStatus();
       return;
     }
 
@@ -584,18 +839,16 @@ export class ChargeController extends EventEmitter {
     }
 
     if (this.belowStopThresholdCount >= config.stableCyclesToStop) {
-      const ok = await this.tesla
-        .stopCharging()
-        .then(() => true)
-        .catch((err) => {
-          log.warn({ err: String(err) }, "stop failed");
-          this.status.lastError = `Failed to stop charging: ${err instanceof Error ? err.message : String(err)}`;
-          return false;
-        });
-      if (ok) {
+      const stopped = await this.sendStop();
+      if (stopped === "blocked") {
+        this.publishBlockStatus();
+        return;
+      }
+      if (stopped === "sent" || stopped === "held") {
         this.status.decision = "idle";
         this.status.targetAmps = null;
         this.aboveStartThresholdCount = 0;
+        if (stopped === "held") this.status.statusNote = this.holdNote("Stop already sent", this.lastStopCommandAt);
       }
       return;
     }
@@ -609,26 +862,106 @@ export class ChargeController extends EventEmitter {
       amps = Math.min(amps, vehicle.chargeAmps);
     }
     this.status.decision = "charging";
-    this.status.targetAmps = amps;
-    if (amps !== vehicle.chargeAmps) {
-      await this.tesla.setChargeAmps(amps).catch((err) => {
-        log.warn({ err: String(err) }, "amps failed");
-        this.status.lastError = `Failed to adjust charge amps: ${err instanceof Error ? err.message : String(err)}`;
-      });
+    this.status.targetAmps = Math.round(amps);
+    const ampResult = await this.sendAmps(amps, vehicle.chargeAmps);
+    if (ampResult === "blocked") {
+      this.publishBlockStatus();
+      return;
     }
+    if (ampResult === "held") this.status.statusNote = this.holdNote("Charge rate already sent", this.lastAmpCommandAt);
+  }
+
+  private explicitSession = false;
+
+  private commandGapOpen(lastAt: number): boolean {
+    // The tick the user turned solar on may send the one start/stop/amp
+    // bundle even if a previous attempt was recent. Every later tick waits.
+    if (this.explicitSession || this.sessionBundleOpen) return true;
+    return commandGapElapsed(Date.now(), lastAt, config.tesla.commandMinIntervalMs);
+  }
+
+  private holdNote(prefix: string, lastAt: number): string {
+    const leftMs = Math.max(0, lastAt + config.tesla.commandMinIntervalMs - Date.now());
+    const secs = Math.round(leftMs / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0 ? `${prefix} · next command in ${m}m ${String(s).padStart(2, "0")}s` : `${prefix} · next command in ${s}s`;
   }
 
   private async applyCharge(amps: number, vehicle: VehicleChargeState | null): Promise<boolean> {
-    try {
-      if (vehicle?.chargingState !== "Charging") {
-        await this.tesla.startCharging();
+    if (vehicle?.chargingState !== "Charging") {
+      const started = await this.sendStart();
+      if (started === "blocked") {
+        this.publishBlockStatus();
+        return false;
       }
-      await this.tesla.setChargeAmps(amps);
-      return true;
+      if (started === "failed") return false;
+      if (started === "held") {
+        this.status.statusNote = this.holdNote("Start already sent", this.lastStartCommandAt);
+        return false;
+      }
+    }
+    const ampResult = await this.sendAmps(amps, vehicle?.chargeAmps ?? Number.NaN);
+    if (ampResult === "blocked") {
+      this.publishBlockStatus();
+      return false;
+    }
+    if (ampResult === "held") this.status.statusNote = this.holdNote("Charge rate already sent", this.lastAmpCommandAt);
+    return ampResult === "sent" || ampResult === "unchanged" || ampResult === "held";
+  }
+
+  private async sendStart(): Promise<"sent" | "held" | "blocked" | "failed"> {
+    if (!this.armPaidCall()) return "blocked";
+    if (!this.commandGapOpen(this.lastStartCommandAt)) return "held";
+    this.lastStartCommandAt = Date.now();
+    try {
+      await this.tesla.startCharging();
+      return "sent";
     } catch (err) {
+      this.observeTeslaError("charge_start", err);
       log.warn({ err: String(err) }, "applyCharge failed");
       this.status.lastError = `Failed to start charging: ${err instanceof Error ? err.message : String(err)}`;
-      return false;
+      return "failed";
+    }
+  }
+
+  private async sendStop(): Promise<"sent" | "held" | "blocked" | "failed"> {
+    if (!this.armPaidCall()) return "blocked";
+    if (!this.commandGapOpen(this.lastStopCommandAt)) return "held";
+    this.lastStopCommandAt = Date.now();
+    try {
+      await this.tesla.stopCharging();
+      return "sent";
+    } catch (err) {
+      this.observeTeslaError("charge_stop", err);
+      log.warn({ err: String(err) }, "stop failed");
+      this.status.lastError = `Failed to stop charging: ${err instanceof Error ? err.message : String(err)}`;
+      return "failed";
+    }
+  }
+
+  private async sendAmps(
+    targetAmps: number,
+    reportedAmps: number
+  ): Promise<"sent" | "unchanged" | "held" | "blocked" | "failed"> {
+    if (!ampCommandNeeded(targetAmps, reportedAmps, this.lastCommandedAmps)) return "unchanged";
+    if (!this.armPaidCall()) return "blocked";
+    if (!this.commandGapOpen(this.lastAmpCommandAt)) return "held";
+    const rounded = Math.round(targetAmps);
+    this.lastAmpCommandAt = Date.now();
+    try {
+      await this.tesla.setChargeAmps(rounded);
+      // Only remember a command Tesla accepted. A failure must stay eligible
+      // for one retry after the gap — marking it commanded would skip that forever.
+      this.lastCommandedAmps = rounded;
+      if (this.status.vehicle) this.status.vehicle = { ...this.status.vehicle, chargeAmps: rounded };
+      if (this.lastPolledVehicle) this.lastPolledVehicle = { ...this.lastPolledVehicle, chargeAmps: rounded };
+      return "sent";
+    } catch (err) {
+      this.observeTeslaError("set_charging_amps", err);
+      log.warn({ err: String(err) }, "amps failed");
+      this.status.lastError = `Failed to adjust charge amps: ${err instanceof Error ? err.message : String(err)}`;
+      return "failed";
     }
   }
 }

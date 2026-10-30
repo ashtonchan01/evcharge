@@ -62,7 +62,8 @@ const schema = z.object({
   // shorter than TESLA_TELEMETRY_STALE_MS because the ramp loop needs a
   // recent reading to charge accurately, not just "the vehicle is still
   // around". If exceeded while chargingState says "Charging", the
-  // controller falls back to a direct poll for that cycle.
+  // controller may poll once per TESLA_TELEMETRY_RECOVERY_POLL_MS, not
+  // every control cycle — Data calls are billed.
   TESLA_TELEMETRY_CHARGING_STALE_MS: numeric().default("90000"),
   // Minimum gap between direct recovery polls while telemetry is stale, so
   // a vehicle that's offline/deep-asleep doesn't get polled every cycle.
@@ -70,8 +71,23 @@ const schema = z.object({
   // How long to stop calling Tesla entirely (reads, commands, wake_up -
   // everything) after a 403/429 response, since Tesla's own account-level
   // rate limit doesn't clear by retrying sooner and every retry just adds
-  // to whatever got it disabled in the first place.
+  // to whatever got it disabled in the first place. Do not shorten this.
   TESLA_RATE_LIMIT_COOLDOWN_MS: numeric().default("1800000"),
+  // Minimum gap between repeated charge_start / charge_stop / set_charging_amps
+  // calls. The control loop used to send those every poll while the car's
+  // reported state lagged, which is most of the Oct 2026 command bill.
+  // A command still goes out immediately when the integer amp target or the
+  // start/stop request is actually new.
+  TESLA_COMMAND_MIN_INTERVAL_MS: numeric().default("300000"),
+  // auto: normal telemetry control until Tesla reports a billing cap, then
+  // pause paid calls for TESLA_API_BUDGET_COOLDOWN_MS. on: pause immediately
+  // (use this for the rest of a month that's already over the $16 Fleet API
+  // discount). off: never enter the billing hold. Turning solar on still
+  // allows one session attempt (see controller).
+  TESLA_API_BUDGET_MODE: z.enum(["auto", "on", "off"]).default("auto"),
+  // How long `auto` mode stays paused after a billing-cap response (HTTP 402
+  // or a billing error body). Longer than the 403/429 cooldown on purpose.
+  TESLA_API_BUDGET_COOLDOWN_MS: numeric().default("21600000"),
   // Optional overnight window where the controller never contacts Tesla at
   // all (no polls, no wake_up, no commands) - the car is just sitting
   // there unplugged-from-solar-purposes, so there's nothing to check.
@@ -139,6 +155,9 @@ export const config = {
     telemetryChargingStaleMs: env.TESLA_TELEMETRY_CHARGING_STALE_MS!,
     telemetryRecoveryPollMs: env.TESLA_TELEMETRY_RECOVERY_POLL_MS!,
     rateLimitCooldownMs: env.TESLA_RATE_LIMIT_COOLDOWN_MS!,
+    commandMinIntervalMs: env.TESLA_COMMAND_MIN_INTERVAL_MS!,
+    apiBudgetMode: env.TESLA_API_BUDGET_MODE,
+    apiBudgetCooldownMs: env.TESLA_API_BUDGET_COOLDOWN_MS!,
     quietHoursStart: env.QUIET_HOURS_START || undefined,
     quietHoursEnd: env.QUIET_HOURS_END || undefined,
     quietHoursTimezone: env.QUIET_HOURS_TIMEZONE,

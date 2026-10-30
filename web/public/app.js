@@ -30,9 +30,99 @@ function setText(id, text) {
 }
 
 let nextPollAt = null;
+let latestStatus = null;
 let chargeLimitPending = false;
+let vehicleRetryTimer = null;
+
+const VEHICLE_CACHE_KEY = "evcharge.vehicles";
+
+function fmtDuration(totalSeconds) {
+  const s = Math.max(0, totalSeconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rem = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${String(rem).padStart(2, "0")}s`;
+  return `${rem}s`;
+}
+
+function readVehicleCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(VEHICLE_CACHE_KEY) || "null");
+    return parsed && Array.isArray(parsed.vehicles) ? parsed.vehicles : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeVehicleCache(vehicles) {
+  try {
+    localStorage.setItem(VEHICLE_CACHE_KEY, JSON.stringify({ vehicles, savedAt: Date.now() }));
+  } catch {
+    // Private mode / blocked storage — the in-memory options still hold.
+  }
+}
+
+function decisionView(status) {
+  const now = Date.now();
+  const nextAt = status.nextTeslaAttemptAt ? new Date(status.nextTeslaAttemptAt).getTime() : 0;
+  const countdown = nextAt > now ? fmtDuration(Math.round((nextAt - now) / 1000)) : null;
+  const rateUntil = status.rateLimitedUntil ? new Date(status.rateLimitedUntil).getTime() : 0;
+
+  if (status.teslaWait === "budget" || (status.apiBudgetActive && status.teslaWait !== "rate_limited")) {
+    return {
+      cls: "budget",
+      label: "Billing limit",
+      note: countdown
+        ? `Paid Tesla calls paused · retry in ${countdown}`
+        : "Paid Tesla calls paused. Turn solar off and on for one try.",
+    };
+  }
+  if (status.teslaWait === "rate_limited" || rateUntil > now) {
+    const left = Math.max(0, Math.round(((rateUntil || nextAt) - now) / 1000));
+    return { cls: "rate_limited", label: "Rate limited", note: `Tesla paused · retry in ${fmtDuration(left)}` };
+  }
+  if (status.teslaWait === "waking") {
+    return { cls: "waking", label: "Waking car", note: countdown ? `Next try in ${countdown}` : "Trying now…" };
+  }
+  if (status.teslaWait === "asleep") {
+    return {
+      cls: "asleep",
+      label: "Car asleep",
+      note: countdown ? `Next try in ${countdown}` : "Waiting for telemetry",
+    };
+  }
+  if (status.teslaWait === "quiet_hours") {
+    return { cls: "idle", label: "Quiet hours", note: "Tesla is left alone overnight" };
+  }
+
+  const labels = {
+    charging: "Charging",
+    idle: "Idle",
+    waiting_for_stability: "Waiting for stability",
+    unavailable: "Unavailable",
+  };
+  let note = status.statusNote || "";
+  if (!note && status.telemetryEnabled && !status.telemetryLastSeenAt && status.override && status.override.enabled) {
+    note = "No streaming telemetry — not spending extra Tesla polls";
+  }
+  return {
+    cls: status.decision || "unavailable",
+    label: labels[status.decision] || String(status.decision || "Unavailable").replace(/_/g, " "),
+    note,
+  };
+}
 
 function tickCountdown() {
+  if (latestStatus) {
+    const view = decisionView(latestStatus);
+    const decisionEl = $("decision");
+    if (decisionEl) {
+      decisionEl.textContent = view.label;
+      decisionEl.className = `decision-pill ${view.cls}`;
+    }
+    setText("decision-note", view.note || "");
+  }
   if (!nextPollAt) {
     setText("next-poll", "–");
     return;
@@ -69,9 +159,12 @@ function render(status) {
   fill.style.width = batteryLevelRounded !== null ? `${batteryLevelRounded}%` : "0%";
   setText("battery-label", batteryLevelRounded !== null ? `${batteryLevelRounded}%` : "–");
 
+  latestStatus = status;
+  const view = decisionView(status);
   const decisionEl = $("decision");
-  decisionEl.textContent = status.decision.replace(/_/g, " ");
-  decisionEl.className = `decision-pill ${status.decision}`;
+  decisionEl.textContent = view.label;
+  decisionEl.className = `decision-pill ${view.cls}`;
+  setText("decision-note", view.note || "");
 
   setText("target-amps", status.targetAmps !== null ? `${Math.round(status.targetAmps)} A` : "–");
   setText("last-poll", fmtTime(status.lastPollAt));
@@ -83,10 +176,7 @@ function render(status) {
   $("enabled-toggle").checked = status.override.enabled;
   setText("enabled-label", status.override.enabled ? "On" : "Off");
 
-  const select = $("vehicle-select");
-  if (status.vehicleTag && [...select.options].some((o) => o.value === status.vehicleTag)) {
-    select.value = status.vehicleTag;
-  }
+  ensureVehicleOption(status.vehicleTag);
 
   const bufferInput = $("buffer-input");
   const bufferRange = $("buffer-range");
@@ -115,27 +205,90 @@ async function fetchStatus() {
   render(await res.json());
 }
 
-async function loadVehicles() {
-  const res = await fetch("/api/vehicles");
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const select = $("vehicle-select");
-    select.innerHTML = `<option value="">Couldn't load vehicles (${body.error || res.status})</option>`;
-    flash("override-message", `Couldn't load vehicles: ${body.error || res.status}`);
-    return;
-  }
+function vehicleOptions() {
+  return [...$("vehicle-select").options].filter((opt) => opt.value);
+}
 
-  const vehicles = await res.json();
+function renderVehicleOptions(vehicles, opts) {
   const select = $("vehicle-select");
   const current = select.value;
-  select.innerHTML = '<option value="">Select vehicle…</option>';
+  const stale = Boolean(opts && opts.stale);
+  select.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = stale ? "Select vehicle… (saved list)" : "Select vehicle…";
+  select.appendChild(placeholder);
   for (const v of vehicles) {
+    if (!v || !v.vin) continue;
     const opt = document.createElement("option");
     opt.value = v.vin;
-    opt.textContent = `${v.displayName || v.vin} (${v.state})`;
+    const name = v.displayName || v.vin;
+    const state = v.state ? ` (${v.state})` : "";
+    opt.textContent = stale ? `${name}${state} · saved` : `${name}${state}`;
     select.appendChild(opt);
   }
-  if (current) select.value = current;
+  if (current && [...select.options].some((opt) => opt.value === current)) select.value = current;
+}
+
+function ensureVehicleOption(tag) {
+  const select = $("vehicle-select");
+  if (!tag) return;
+  if (![...select.options].some((opt) => opt.value === tag)) {
+    const opt = document.createElement("option");
+    opt.value = tag;
+    opt.textContent = tag;
+    select.appendChild(opt);
+  }
+  select.value = tag;
+}
+
+function scheduleVehicleRetry(ms) {
+  if (vehicleRetryTimer) return;
+  vehicleRetryTimer = setTimeout(() => {
+    vehicleRetryTimer = null;
+    void loadVehicles();
+  }, ms);
+}
+
+function showVehicleError(message) {
+  const select = $("vehicle-select");
+  if (vehicleOptions().length > 0) return;
+  select.replaceChildren();
+  const opt = document.createElement("option");
+  opt.value = "";
+  opt.textContent = message;
+  select.appendChild(opt);
+}
+
+async function loadVehicles() {
+  const cached = readVehicleCache();
+  if (cached.length && vehicleOptions().length === 0) renderVehicleOptions(cached, { stale: true });
+
+  try {
+    const res = await fetch("/api/vehicles");
+    const body = await res.json().catch(() => ({}));
+    const vehicles = Array.isArray(body) ? body : body.vehicles;
+    if (Array.isArray(vehicles) && vehicles.length) {
+      writeVehicleCache(vehicles);
+      renderVehicleOptions(vehicles, { stale: Boolean(body.stale) || !res.ok });
+    }
+
+    if (!res.ok || body.error) {
+      const reason = body.error || `HTTP ${res.status}`;
+      if (!vehicles || !vehicles.length) showVehicleError(`Couldn't load vehicles (${reason})`);
+      else flash("override-message", "Couldn't refresh vehicles; showing the last list.");
+      const slow = res.status === 403 || res.status === 429 || /rate|billing|paused/i.test(String(body.error || ""));
+      scheduleVehicleRetry(slow ? 5 * 60 * 1000 : 60 * 1000);
+      return;
+    }
+  } catch (err) {
+    if (!cached.length && vehicleOptions().length === 0) {
+      showVehicleError(`Couldn't load vehicles (${err.message || "network"})`);
+    } else {
+      flash("override-message", "Couldn't refresh vehicles; showing the last list.");
+    }
+    scheduleVehicleRetry(60 * 1000);
+  }
 }
 
 $("vehicle-select").addEventListener("change", async (e) => {
