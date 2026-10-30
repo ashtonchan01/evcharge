@@ -302,9 +302,25 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
   color: var(--waiting);
 }
 
-.decision-pill.unavailable {
+.decision-pill.unavailable,
+.decision-pill.rate_limited,
+.decision-pill.budget {
   background: rgba(255, 90, 122, 0.15);
   color: var(--bad);
+}
+
+.decision-pill.waking,
+.decision-pill.asleep {
+  background: rgba(255, 183, 3, 0.15);
+  color: var(--waiting);
+}
+
+.decision-note {
+  margin: -6px 0 12px;
+  min-height: 1.15em;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 /* battery gauge */

@@ -142,7 +142,11 @@ export class TeslaFleetClient {
     });
 
     if (!res.ok) {
-      throw new Error(`Tesla token refresh failed: HTTP ${res.status} ${await res.text()}`);
+      const text = await res.text();
+      // Preserve the HTTP status so 403/429 (including the auth-edge
+      // "Access Denied" page) trip the same cooldown as a vehicle call
+      // instead of being retried every poll.
+      throw new TeslaApiError(`Tesla token refresh failed: HTTP ${res.status} ${text}`, res.status);
     }
 
     const body = (await res.json()) as { access_token: string; refresh_token?: string };

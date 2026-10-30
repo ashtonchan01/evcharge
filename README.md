@@ -204,8 +204,119 @@ Third-Party App Data Streaming" enabled manually on the car's touchscreen
 first - everything else should Just Work once the config push succeeds.
 
 If any of this doesn't match what you see (wrong field names, no data
-arriving), the app keeps working by falling back to the old
-always-poll behavior - it just costs what it cost before.
+arriving), the app falls back to a direct poll at
+`TESLA_TELEMETRY_RECOVERY_POLL_MS` rather than every control cycle.
+That fallback is billed — see "Tesla API cost" below.
+
+## Tesla API cost
+
+Fleet API calls are billed. Streaming telemetry is the cheap signal;
+`vehicle_data` (Data), `wake_up` (Wakes), and charge commands (Commands)
+are not. As of the October 2026 bill the $16 monthly discount was used up
+(about $9.96 of that was Commands). The controller therefore:
+
+- Trusts a fresh telemetry hint and does **not** poll `vehicle_data` on
+  every loop, including when charging-power fields are only briefly stale.
+  A direct poll runs at most every `TESLA_TELEMETRY_RECOVERY_POLL_MS`
+  (5 minutes) while telemetry is stale, plus **one** poll when solar
+  charging is turned on and telemetry has nothing fresh.
+- Sends `wake_up` at most once per unreachable streak, on that same gap.
+  It does not wake again until a poll succeeds or you turn solar on.
+- Sends `charge_start`, `charge_stop`, and `set_charging_amps` only when
+  the integer amp target or the start/stop request actually differs from
+  what was last sent or what the car already reports, and not more often
+  than `TESLA_COMMAND_MIN_INTERVAL_MS`. A lagged "Stopped" or old amp
+  reading no longer repeats the command every poll.
+- On HTTP 403/429, pauses **all** Tesla calls for
+  `TESLA_RATE_LIMIT_COOLDOWN_MS` (30 minutes). That window is never
+  shortened.
+- On a billing-cap response (HTTP 402, or an error body about billing /
+  payment / quota), `TESLA_API_BUDGET_MODE=auto` pauses paid calls for
+  `TESLA_API_BUDGET_COOLDOWN_MS` (6 hours). Set the mode to `on` for the
+  rest of a month that is already over the discount: the dashboard shows
+  **Billing limit**, and turning solar off and on allows one session
+  attempt (telemetry if it is fresh, otherwise one wake and one poll,
+  then at most one start and one amp change).
+
+The dashboard says **Waking car** / **Car asleep** with the real time
+until the next try, **Rate limited** with the 403/429 countdown, or
+**Billing limit** while paid calls are paused. It does not poll Tesla
+faster to make those messages update.
+
+## Dashboard TLS (ev.ashtonchan.com)
+
+Checked 30 Oct 2026 from outside the VM:
+
+- `https://ev.ashtonchan.com` presents a Let's Encrypt cert with
+  **CN `key.ashtonchan.com`** and SAN **`ev.ashtonchan.com`**,
+  **`key.ashtonchan.com`**. The name coverage is fine. The cert **expired
+  22 Oct 2026** (`notAfter=Oct 22 05:10:15 2026 GMT`).
+- Port 443 then asks for a **client certificate** and closes the
+  connection (`tlsv13 alert certificate required`). That is fleet-telemetry
+  (mTLS), not the dashboard. A phone cannot load the app there even after
+  the cert is renewed.
+- Port 80 is the default nginx welcome page (`nginx/1.18.0`). The app
+  itself is plain HTTP on **port 3000**.
+
+Renew the existing cert (it already lists both names) and reload whatever
+process is using it. On the Oracle VM (`ubuntu@161.33.228.226`), from a
+shell that has your SSH key:
+
+```bash
+sudo certbot certificates
+# Note the certificate name and the path of fullchain.pem / privkey.pem.
+sudo certbot renew --cert-name key.ashtonchan.com
+# If renew says the name is expired and will not renew in place:
+sudo certbot certonly --nginx \
+  --cert-name key.ashtonchan.com \
+  -d ev.ashtonchan.com -d key.ashtonchan.com
+# --nginx only works if nginx is the server on port 80 for the HTTP-01
+# challenge. If certbot cannot bind or nginx has no matching server block:
+sudo certbot certonly --webroot -w /var/www/html \
+  --cert-name key.ashtonchan.com \
+  -d ev.ashtonchan.com -d key.ashtonchan.com
+```
+
+Point fleet-telemetry's `tls.server_cert` / `server_key` at the renewed
+`fullchain.pem` and `privkey.pem` if those paths are not already the
+Let's Encrypt live symlinks, then `pm2 restart fleet-telemetry`.
+
+To make `https://ev.ashtonchan.com` serve **this** app, nginx has to own
+that name on 443 and proxy to `127.0.0.1:3000`. Telemetry can keep 443
+only if it moves to another port or another SNI (`key.ashtonchan.com`)
+via nginx's `stream` module — both cannot require a client cert on
+`ev.ashtonchan.com:443`. Example site (install as root, then
+`sudo nginx -t && sudo systemctl reload nginx`):
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name ev.ashtonchan.com;
+  ssl_certificate     /etc/letsencrypt/live/key.ashtonchan.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/key.ashtonchan.com/privkey.pem;
+  location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+```
+
+Until that proxy exists, the phone dashboard is `http://161.33.228.226:3000`
+(no TLS). Push notifications need the HTTPS proxy above.
+
+App deploy, from the VM checkout, after `git pull` on `main`:
+
+```bash
+cd ~/evcharge && git pull && npm run build && pm2 restart evcharge
+```
+
+For the rest of October 2026, also set `TESLA_API_BUDGET_MODE=on` in `.env`
+before that restart so a deploy does not resume command/poll/wake traffic
+against a capped Fleet API account. Set it back to `auto` when the next
+billing period opens.
 
 ## Tuning
 
