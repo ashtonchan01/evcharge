@@ -5,6 +5,7 @@ import { chargeLimitCommandBody } from "../chargeLimit.js";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
 import { teslaCommandFailureReason } from "./commandResult.js";
+import { vehicleLabel } from "../vehicleLabel.js";
 
 const log = logger.child({ module: "tesla" });
 
@@ -259,7 +260,7 @@ export class TeslaFleetClient {
     return (res.response ?? []).map((v) => ({
       id: String(v.id_s ?? v.id),
       vin: String(v.vin),
-      displayName: String(v.display_name ?? ""),
+      displayName: vehicleLabel(String(v.vin ?? ""), String(v.display_name ?? "")),
       state: String(v.state ?? "unknown"),
     }));
   }

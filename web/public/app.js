@@ -209,6 +209,47 @@ function vehicleOptions() {
   return [...$("vehicle-select").options].filter((opt) => opt.value);
 }
 
+// Keep in sync with src/vehicleLabel.ts. Option values stay VINs.
+const VIN_LABELS = {
+  "5YJ3F7EA5KF461091": "Model 3",
+  "5YJXDCE25JF080915": "Model X",
+};
+
+const SHORT_LABELS = {
+  M3: "Model 3",
+  MX: "Model X",
+  MS: "Model S",
+  MY: "Model Y",
+};
+
+function modelFromVin(vin) {
+  if (!vin || vin.length < 4) return "";
+  const wmi = vin.slice(0, 3);
+  if (wmi !== "5YJ" && wmi !== "7SA" && wmi !== "LRW") return "";
+  switch (vin[3]) {
+    case "3":
+      return "Model 3";
+    case "S":
+      return "Model S";
+    case "X":
+      return "Model X";
+    case "Y":
+      return "Model Y";
+    default:
+      return "";
+  }
+}
+
+function vehicleLabel(vin, displayName) {
+  const id = String(vin || "").trim().toUpperCase();
+  if (id && VIN_LABELS[id]) return VIN_LABELS[id];
+  const raw = String(displayName || "").trim();
+  const short = SHORT_LABELS[raw.toUpperCase()];
+  if (short) return short;
+  if (raw && raw.toUpperCase() !== id) return raw;
+  return modelFromVin(id) || raw || id;
+}
+
 function renderVehicleOptions(vehicles, opts) {
   const select = $("vehicle-select");
   const current = select.value;
@@ -222,9 +263,8 @@ function renderVehicleOptions(vehicles, opts) {
     if (!v || !v.vin) continue;
     const opt = document.createElement("option");
     opt.value = v.vin;
-    const name = v.displayName || v.vin;
-    const state = v.state ? ` (${v.state})` : "";
-    opt.textContent = stale ? `${name}${state} · saved` : `${name}${state}`;
+    opt.dataset.displayName = v.displayName || "";
+    opt.textContent = vehicleLabel(v.vin, v.displayName);
     select.appendChild(opt);
   }
   if (current && [...select.options].some((opt) => opt.value === current)) select.value = current;
@@ -233,12 +273,15 @@ function renderVehicleOptions(vehicles, opts) {
 function ensureVehicleOption(tag) {
   const select = $("vehicle-select");
   if (!tag) return;
-  if (![...select.options].some((opt) => opt.value === tag)) {
-    const opt = document.createElement("option");
+  let opt = [...select.options].find((option) => option.value === tag);
+  if (!opt) {
+    opt = document.createElement("option");
     opt.value = tag;
-    opt.textContent = tag;
     select.appendChild(opt);
   }
+  // Status updates only know the VIN. Relabel every time so a raw VIN
+  // option created before the vehicle list arrives does not stick.
+  opt.textContent = vehicleLabel(tag, opt.dataset.displayName || "");
   select.value = tag;
 }
 
