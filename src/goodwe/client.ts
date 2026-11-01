@@ -5,7 +5,10 @@ import { logger } from "../util/logger.js";
 const log = logger.child({ module: "goodwe" });
 const REQUEST_TIMEOUT_MS = 20_000;
 
-async function fetchWithTimeout(url: string, init: Record<string, unknown>): Promise<Response> {
+/** Narrower than DOM `fetch` so tests can inject a string-URL stub. */
+export type SemsFetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+async function fetchWithTimeout(url: string, init: RequestInit, fetchImpl: SemsFetch): Promise<Response> {
   const controller = new AbortController();
   const abortTimer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let raceTimer: ReturnType<typeof setTimeout>;
@@ -17,7 +20,10 @@ async function fetchWithTimeout(url: string, init: Record<string, unknown>): Pro
   });
 
   try {
-    return await Promise.race([fetch(url, { ...init, signal: controller.signal }), timeoutPromise]);
+    return await Promise.race([
+      fetchImpl(url, { ...init, signal: controller.signal }),
+      timeoutPromise,
+    ]);
   } finally {
     clearTimeout(abortTimer);
     clearTimeout(raceTimer!);
@@ -62,32 +68,39 @@ interface SemsTokenBundle {
 export class GoodweSemsClient {
   private tokenBundle: SemsTokenBundle | null = null;
   private baseUrl: string;
+  private readonly fetchImpl: SemsFetch;
 
   constructor(
     private readonly account: string,
     private readonly password: string,
     private readonly stationId: string,
-    baseUrl: string
+    baseUrl: string,
+    fetchImpl: SemsFetch = fetch
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.fetchImpl = fetchImpl;
   }
 
   private async login(): Promise<SemsTokenBundle> {
-    const res = await fetchWithTimeout(`${this.baseUrl}/v2/Common/CrossLogin`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        token: JSON.stringify({
-          uid: "",
-          timestamp: 0,
-          token: "",
-          client: "web",
-          version: "",
-          language: "en",
-        }),
+    const res = await fetchWithTimeout(
+      `${this.baseUrl}/v2/Common/CrossLogin`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          token: JSON.stringify({
+            uid: "",
+            timestamp: 0,
+            token: "",
+            client: "web",
+            version: "",
+            language: "en",
+          }),
+        },
+        body: JSON.stringify({ account: this.account, pwd: this.password }),
       },
-      body: JSON.stringify({ account: this.account, pwd: this.password }),
-    });
+      this.fetchImpl
+    );
 
     if (!res.ok) {
       throw new Error(`SEMS login failed: HTTP ${res.status}`);
@@ -133,14 +146,18 @@ export class GoodweSemsClient {
     let bundle = await this.getTokenBundle();
 
     const doRequest = async (t: SemsTokenBundle) =>
-      fetchWithTimeout(`${this.baseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          token: t.raw,
+      fetchWithTimeout(
+        `${this.baseUrl}${path}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            token: t.raw,
+          },
+          body: JSON.stringify(payload),
         },
-        body: JSON.stringify(payload),
-      });
+        this.fetchImpl
+      );
 
     let res = await doRequest(bundle);
     if (res.status === 401) {
@@ -170,41 +187,143 @@ export class GoodweSemsClient {
 
   /**
    * Fetch the latest real-time power figures for the configured power
-   * station. The `data.powerflow` block is the authoritative real-time
-   * source - `data.kpi` only carries PV output (already in watts, despite
-   * the field name) plus lifetime/daily energy totals, with no load or
-   * grid figures at all.
+   * station.
+   *
+   * `GetMonitorDetailByPowerstationId` used to embed `data.powerflow`. It
+   * now often returns HTTP 200 / code 0 with an empty `data` object, which
+   * made every reading look like 0W. `GetPowerflow` still returns the live
+   * block (`pv` / `load` / `grid` as `376W` or the older `2690(W)`). Use
+   * that first, and fall back to monitor detail when it still has a
+   * powerflow (or when GetPowerflow itself fails).
    */
   async getSnapshot(): Promise<SolarSnapshot> {
-    const body = await this.postWithAuth<{ data: Record<string, unknown> }>(
+    const flowBody = await this.tryPost<{ code?: number | string; msg?: string; data?: unknown }>(
+      "/v2/PowerStation/GetPowerflow",
+      { powerStationId: this.stationId }
+    );
+    const fromFlow = flowBody ? extractPowerflow(flowBody.data) : null;
+    if (fromFlow) {
+      log.debug({ powerflow: fromFlow.powerflow }, "Using SEMS GetPowerflow for the station snapshot");
+      return snapshotFromPowerflow(fromFlow.powerflow, fromFlow.info);
+    }
+
+    log.debug("GetPowerflow had no powerflow; falling back to GetMonitorDetailByPowerstationId");
+    const detailBody = await this.postWithAuth<{ data?: unknown }>(
       "/v2/PowerStation/GetMonitorDetailByPowerstationId",
       { powerStationId: this.stationId }
     );
-
-    log.debug({ body }, "Raw SEMS monitor-detail response");
-
-    const data = body.data ?? {};
-    const powerflow = (data.powerflow ?? {}) as Record<string, unknown>;
-    const info = (data.info ?? {}) as Record<string, unknown>;
-
-    const pvW = parseWatts(powerflow.pv) ?? 0;
-    const loadW = parseWatts(powerflow.load) ?? 0;
-    const batteryW = parseWatts(powerflow.bettery) ?? 0; // sic - GoodWe's own field name typo
-    // Positive = exporting: pv output not consumed by the house.
-    const gridW = pvW - loadW;
-
-    const hasBattery = Number(info.battery_capacity ?? 0) > 0;
-    const soc = hasBattery ? numberOrNull(powerflow.soc) : null;
-
-    return {
-      timestamp: new Date(),
-      pvPowerW: pvW,
-      loadPowerW: loadW,
-      gridPowerW: gridW,
-      batteryPowerW: batteryW,
-      batterySoc: soc,
-    };
+    log.debug({ body: detailBody }, "Raw SEMS monitor-detail response");
+    const fromDetail = extractPowerflow(detailBody.data);
+    return snapshotFromPowerflow(fromDetail?.powerflow ?? {}, fromDetail?.info ?? {});
   }
+
+  /**
+   * Like postWithAuth, but a transport error or a non-success SEMS code
+   * returns null so getSnapshot can try the other endpoint. Session
+   * expiry (code 100002) is still retried inside postWithAuth.
+   */
+  private async tryPost<T extends { code?: number | string; msg?: string }>(
+    path: string,
+    payload: unknown
+  ): Promise<T | null> {
+    try {
+      const body = await this.postWithAuth<T>(path, payload);
+      if (!isSemsSuccess(body)) {
+        log.debug({ path, code: body.code, msg: body.msg }, "SEMS call returned a non-success code");
+        return null;
+      }
+      return body;
+    } catch (err) {
+      log.debug({ path, err: err instanceof Error ? err.message : String(err) }, "SEMS call failed");
+      return null;
+    }
+  }
+}
+
+function isSemsSuccess(body: { code?: number | string }): boolean {
+  return body.code === undefined || body.code === 0 || body.code === "0";
+}
+
+const POWERFLOW_KEYS = ["pv", "load", "grid", "bettery", "battery"] as const;
+
+function hasPowerReadings(record: Record<string, unknown>): boolean {
+  return POWERFLOW_KEYS.some((key) => {
+    const value = record[key];
+    return value !== undefined && value !== null && value !== "";
+  });
+}
+
+export interface ExtractedPowerflow {
+  powerflow: Record<string, unknown>;
+  info: Record<string, unknown>;
+}
+
+/**
+ * GetPowerflow returns the powerflow object as `data`. Monitor detail
+ * nests it under `data.powerflow` (with station `data.info` beside it).
+ * An empty object is not a reading.
+ */
+export function extractPowerflow(data: unknown): ExtractedPowerflow | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  const info =
+    record.info && typeof record.info === "object" && !Array.isArray(record.info)
+      ? (record.info as Record<string, unknown>)
+      : {};
+
+  const nested = record.powerflow;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const powerflow = nested as Record<string, unknown>;
+    if (hasPowerReadings(powerflow)) return { powerflow, info };
+  }
+
+  if (hasPowerReadings(record)) return { powerflow: record, info };
+  return null;
+}
+
+export function snapshotFromPowerflow(
+  powerflow: Record<string, unknown>,
+  info: Record<string, unknown> = {},
+  timestamp = new Date()
+): SolarSnapshot {
+  const pvW = parseWatts(powerflow.pv) ?? 0;
+  const loadW = parseWatts(powerflow.load) ?? 0;
+  // sic - GoodWe's own field name typo is `bettery`; accept `battery` too.
+  const batteryW = parseWatts(powerflow.bettery ?? powerflow.battery) ?? 0;
+  const gridW = signedGridPowerW(powerflow, pvW, loadW);
+
+  const hasBattery = Number(info.battery_capacity ?? 0) > 0;
+  const soc = hasBattery ? numberOrNull(powerflow.soc) : null;
+
+  return {
+    timestamp,
+    pvPowerW: pvW,
+    loadPowerW: loadW,
+    gridPowerW: gridW,
+    batteryPowerW: batteryW,
+    batterySoc: soc,
+  };
+}
+
+/**
+ * App convention: positive grid watts are export, negative are import.
+ * SEMS reports `grid` as an unsigned magnitude (`376W` or `2690(W)`) and
+ * puts direction on `gridStatus` (-1 importing, 0 idle, 1 exporting).
+ * Without that status, keep the previous pv - load estimate so an older
+ * monitor-detail payload does not flip sign.
+ */
+function signedGridPowerW(powerflow: Record<string, unknown>, pvW: number, loadW: number): number {
+  const raw = parseWatts(powerflow.grid);
+  if (raw === null) return pvW - loadW;
+
+  const status = numberOrNull(powerflow.gridStatus);
+  if (status === null) return raw < 0 ? raw : pvW - loadW;
+
+  const magnitude = Math.abs(raw);
+  if (status === 1) return magnitude;
+  if (status === -1) return -magnitude;
+  if (status === 0) return 0;
+  return pvW - loadW;
 }
 
 function numberOrNull(v: unknown): number | null {
@@ -213,10 +332,10 @@ function numberOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// SEMS reports powerflow figures as strings like "2690(W)".
-function parseWatts(v: unknown): number | null {
+/** SEMS power strings are either `376W` or the older `2690(W)` / `216.52(W)`. */
+export function parseWatts(v: unknown): number | null {
   if (typeof v !== "string") return numberOrNull(v);
-  const match = v.match(/-?\d+(\.\d+)?/);
+  const match = v.match(/-?\d+(?:\.\d+)?/);
   return match ? Number(match[0]) : null;
 }
 
