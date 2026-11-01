@@ -7,6 +7,7 @@ import { logger } from "../util/logger.js";
 import {
   ampCommandNeeded,
   budgetBlocksPaidCalls,
+  chargeSnapshotIsAwake,
   classifyTeslaBlock,
   commandGapElapsed,
   planRecovery,
@@ -34,7 +35,7 @@ export interface ControllerStatus {
   vehicleTag: string;
   surplusW: number | null;
   targetAmps: number | null;
-  decision: "charging" | "idle" | "waiting_for_stability" | "unavailable";
+  decision: "charging" | "idle" | "waiting_for_stability" | "unavailable" | "online";
   override: OverrideState;
   gridImportBufferW: number;
   lastError: string | null;
@@ -340,7 +341,45 @@ export class ChargeController extends EventEmitter {
     }
 
     this.reapplyCommandedChargeLimit();
+    this.reconcileAwakeDisplay();
     this.emitUpdate();
+  }
+
+  /**
+   * A successful vehicle_data read already proved the car is online. Later
+   * ticks still wait out the recovery gap before the next paid poll, but
+   * that wait must not be labeled "Waking" / "Asleep" over a live snapshot.
+   */
+  private reconcileAwakeDisplay(): void {
+    if (
+      this.status.teslaWait === "rate_limited" ||
+      this.status.teslaWait === "budget" ||
+      this.status.teslaWait === "quiet_hours"
+    ) {
+      return;
+    }
+    if (this.consecutiveFailures > 0 || this.status.lastError) return;
+
+    const vehicle = this.status.vehicle;
+    if (!vehicle || !this.snapshotIsCurrent(vehicle) || !chargeSnapshotIsAwake(vehicle)) return;
+
+    if (this.status.teslaWait === "waking" || this.status.teslaWait === "asleep") {
+      this.status.teslaWait = "none";
+      this.status.nextTeslaAttemptAt = null;
+    }
+
+    if (this.status.decision === "unavailable") {
+      const charging =
+        vehicle.chargingState === "Charging" ||
+        vehicle.chargingState === "Starting" ||
+        (vehicle.chargerVoltage > 0 && vehicle.chargerActualCurrent > 0);
+      this.status.decision = charging ? "charging" : "online";
+    }
+  }
+
+  private snapshotIsCurrent(vehicle: VehicleChargeState): boolean {
+    const age = Date.now() - new Date(vehicle.timestamp).getTime();
+    return age >= -5_000 && age <= config.tesla.telemetryRecoveryPollMs;
   }
 
   /**
@@ -582,10 +621,6 @@ export class ChargeController extends EventEmitter {
     this.haveFreshControlState = false;
     const followUp = this.recoveryPlan(Date.now(), false);
     this.publishTeslaWait(followUp);
-    if (followUp.wait === "none") {
-      this.status.teslaWait = this.lastWakeAttemptAt > 0 ? "waking" : "asleep";
-      this.status.nextTeslaAttemptAt = new Date(Date.now() + config.tesla.telemetryRecoveryPollMs);
-    }
     return this.lastPolledVehicle;
   }
 

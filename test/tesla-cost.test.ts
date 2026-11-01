@@ -14,6 +14,7 @@ import type { AddressInfo } from "node:net";
 import {
   ampCommandNeeded,
   budgetBlocksPaidCalls,
+  chargeSnapshotIsAwake,
   classifyTeslaBlock,
   commandGapElapsed,
   planRecovery,
@@ -76,6 +77,19 @@ describe("planRecovery", () => {
     const plan = planRecovery(base);
     assert.equal(plan.shouldPoll, false);
     assert.equal(plan.shouldWake, false);
+    // Last poll succeeded, so this gap is not a "waking" countdown.
+    assert.equal(plan.wait, "none");
+    assert.equal(plan.nextAttemptAt, null);
+  });
+
+  it("keeps a waking countdown only while the car has not answered", () => {
+    const plan = planRecovery({
+      ...base,
+      lastWakeAttemptAt: base.now - 10_000,
+      consecutiveFailures: 2,
+    });
+    assert.equal(plan.shouldPoll, false);
+    assert.equal(plan.wait, "waking");
     assert.equal(plan.nextAttemptAt, base.lastFallbackAttemptAt + FIVE_MIN);
   });
 
@@ -111,6 +125,15 @@ describe("planRecovery", () => {
     const budget = planRecovery({ ...base, budgetBlocked: true, budgetUntil: base.now + 21_600_000, sessionProbePending: true });
     assert.equal(budget.shouldPoll, false);
     assert.equal(budget.wait, "budget");
+  });
+});
+
+describe("chargeSnapshotIsAwake", () => {
+  it("treats charging and live charger fields as awake, not a sleep", () => {
+    assert.equal(chargeSnapshotIsAwake({ chargingState: "Charging", chargerVoltage: 240, chargerActualCurrent: 8 }), true);
+    assert.equal(chargeSnapshotIsAwake({ chargingState: "Stopped", chargerVoltage: 0, chargerActualCurrent: 0 }), true);
+    assert.equal(chargeSnapshotIsAwake({ chargingState: "Unknown", chargerVoltage: 0, chargerActualCurrent: 0 }), false);
+    assert.equal(chargeSnapshotIsAwake(null), false);
   });
 });
 
@@ -250,6 +273,61 @@ describe("charge command dedup and cooldowns", () => {
       assert.ok(budgetAt - billBefore >= config.tesla.apiBudgetCooldownMs - 50);
       assert.ok((status.rateLimitedUntil?.getTime() ?? 0) >= firstUntil);
     }
+  });
+});
+
+describe("awake snapshot display", () => {
+  it("does not stay on waking after a poll shows the car charging", async () => {
+    const { ChargeController } = await import("../src/controller/index.ts");
+
+    let polls = 0;
+    const goodwe = {
+      async getSnapshot() {
+        return {
+          timestamp: new Date(),
+          pvPowerW: 4000,
+          loadPowerW: 400,
+          gridPowerW: -3600,
+          batteryPowerW: 0,
+          batterySoc: 0,
+        };
+      },
+    };
+    const tesla = {
+      getVehicleTag: () => "5YJ3F7EA5KF461091",
+      setVehicleTag() {},
+      async getChargeState() {
+        polls += 1;
+        return {
+          chargingState: "Charging",
+          chargeAmps: 5,
+          chargeLimitSoc: 80,
+          batteryLevel: 50,
+          chargerVoltage: 240,
+          chargerActualCurrent: 8,
+          pluggedIn: true,
+          timestamp: new Date(),
+        };
+      },
+      async wakeUp() {},
+      async startCharging() {},
+      async stopCharging() {},
+      async setChargeAmps() {},
+    };
+
+    const controller = new ChargeController(goodwe as never, tesla as never, null);
+    const internal = controller as unknown as { tick(): Promise<void> };
+    controller.setEnabled(true, "test");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await internal.tick();
+
+    const status = controller.getStatus();
+    assert.equal(polls, 1, "the follow-up tick must not spend another vehicle_data call");
+    assert.equal(status.vehicle?.chargingState, "Charging");
+    assert.equal(status.decision, "charging");
+    assert.notEqual(status.teslaWait, "waking");
+    assert.notEqual(status.teslaWait, "asleep");
+    assert.equal(status.nextTeslaAttemptAt, null);
   });
 });
 
