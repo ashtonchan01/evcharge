@@ -63,6 +63,18 @@ function writeVehicleCache(vehicles) {
   }
 }
 
+function vehicleIsCharging(vehicle) {
+  if (!vehicle) return false;
+  if (vehicle.chargingState === "Charging" || vehicle.chargingState === "Starting") return true;
+  return (Number(vehicle.chargerVoltage) || 0) > 0 && (Number(vehicle.chargerActualCurrent) || 0) > 0;
+}
+
+function vehicleIsOnline(vehicle) {
+  if (!vehicle) return false;
+  if (vehicleIsCharging(vehicle)) return true;
+  return vehicle.chargingState === "Stopped" || vehicle.chargingState === "Complete" || vehicle.chargingState === "NoPower";
+}
+
 function decisionView(status) {
   const now = Date.now();
   const nextAt = status.nextTeslaAttemptAt ? new Date(status.nextTeslaAttemptAt).getTime() : 0;
@@ -82,6 +94,15 @@ function decisionView(status) {
     const left = Math.max(0, Math.round(((rateUntil || nextAt) - now) / 1000));
     return { cls: "rate_limited", label: "Rate limited", note: `Tesla paused · retry in ${fmtDuration(left)}` };
   }
+  const chargingNow = vehicleIsCharging(status.vehicle);
+  const onlineNow = vehicleIsOnline(status.vehicle);
+  // A live charge snapshot wins over a recovery-gap "waking" countdown.
+  if ((status.teslaWait === "waking" || status.teslaWait === "asleep" || status.decision === "unavailable") && chargingNow) {
+    return { cls: "charging", label: "Charging", note: status.statusNote || "" };
+  }
+  if ((status.teslaWait === "waking" || status.teslaWait === "asleep") && onlineNow) {
+    return { cls: "online", label: "Online", note: "" };
+  }
   if (status.teslaWait === "waking") {
     return { cls: "waking", label: "Waking car", note: countdown ? `Next try in ${countdown}` : "Trying now…" };
   }
@@ -98,12 +119,21 @@ function decisionView(status) {
 
   const labels = {
     charging: "Charging",
+    online: "Online",
     idle: "Idle",
     waiting_for_stability: "Waiting for stability",
     unavailable: "Unavailable",
   };
   let note = status.statusNote || "";
-  if (!note && status.telemetryEnabled && !status.telemetryLastSeenAt && status.override && status.override.enabled) {
+  if (
+    !note &&
+    !chargingNow &&
+    !onlineNow &&
+    status.telemetryEnabled &&
+    !status.telemetryLastSeenAt &&
+    status.override &&
+    status.override.enabled
+  ) {
     note = "No streaming telemetry — not spending extra Tesla polls";
   }
   return {

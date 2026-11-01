@@ -127,12 +127,35 @@ export function planRecovery(input: RecoveryPlanInput): RecoveryPlan {
   // probe may wake once even mid-streak; it does not start a faster cadence.
   const wakeDue = pollDue && (input.sessionProbePending || (input.consecutiveFailures === 0 && sinceWake >= gap));
   const nextPollAt = input.lastFallbackAttemptAt <= 0 ? input.now : input.lastFallbackAttemptAt + gap;
-  const wokeRecently = input.lastWakeAttemptAt > 0 && sinceWake < gap;
+  // "Waking" is only for a wake that has not been answered yet. A successful
+  // poll (consecutiveFailures === 0) means the car already responded — the
+  // next paid poll can still wait out `gap`, but the dashboard must not
+  // count that gap down as if the car were asleep.
+  const outOfContact = input.consecutiveFailures > 0;
+  const wokeRecently = outOfContact && input.lastWakeAttemptAt > 0 && sinceWake < gap;
+
+  let wait: TeslaWait = "none";
+  if (!pollDue && outOfContact) wait = wokeRecently ? "waking" : "asleep";
 
   return {
     shouldPoll: pollDue,
     shouldWake: wakeDue,
-    wait: pollDue ? "none" : wokeRecently ? "waking" : "asleep",
-    nextAttemptAt: pollDue ? input.now : nextPollAt,
+    wait,
+    nextAttemptAt: pollDue ? input.now : outOfContact ? nextPollAt : null,
   };
+}
+
+/** True when a vehicle_data / telemetry snapshot shows the car is online. */
+export function chargeSnapshotIsAwake(vehicle: {
+  chargingState?: string | null;
+  chargerVoltage?: number | null;
+  chargerActualCurrent?: number | null;
+} | null | undefined): boolean {
+  if (!vehicle) return false;
+  const state = vehicle.chargingState ?? "";
+  if (state === "Charging" || state === "Starting") return true;
+  const volts = Number(vehicle.chargerVoltage) || 0;
+  const amps = Number(vehicle.chargerActualCurrent) || 0;
+  if (volts > 0 && amps > 0) return true;
+  return state === "Stopped" || state === "Complete" || state === "NoPower" || state === "Disconnected";
 }

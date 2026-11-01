@@ -292,6 +292,11 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
   box-shadow: 0 0 16px -6px rgba(34, 211, 238, 0.8);
 }
 
+.decision-pill.online {
+  background: rgba(52, 224, 161, 0.15);
+  color: var(--good);
+}
+
 .decision-pill.idle {
   background: rgba(137, 150, 172, 0.15);
   color: #b8c4da;
