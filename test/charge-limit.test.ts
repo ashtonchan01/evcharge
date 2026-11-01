@@ -13,6 +13,7 @@ process.env.TESLA_REFRESH_TOKEN ??= "test-refresh";
 process.env.TESLA_VEHICLE_TAG ??= "5YJ3TESTVIN000001";
 process.env.QUIET_HOURS_START ??= "";
 process.env.QUIET_HOURS_END ??= "";
+process.env.TESLA_HOLDS_PATH ??= `/tmp/evcharge-holds-charge-limit-${process.pid}.json`;
 
 describe("parseChargeLimitPercent", () => {
   it("accepts every integer from 50 through 100, including 90 and 100", () => {

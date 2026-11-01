@@ -227,9 +227,17 @@ are not. As of the October 2026 bill the $16 monthly discount was used up
   what was last sent or what the car already reports, and not more often
   than `TESLA_COMMAND_MIN_INTERVAL_MS`. A lagged "Stopped" or old amp
   reading no longer repeats the command every poll.
-- On HTTP 403/429, pauses **all** Tesla calls for
-  `TESLA_RATE_LIMIT_COOLDOWN_MS` (30 minutes). That window is never
-  shortened.
+- On a non-billing HTTP 403, pauses **all** Tesla calls for
+  `TESLA_RATE_LIMIT_COOLDOWN_MS` (30 minutes). A plain 429 pauses for
+  `TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS` (5 minutes). Neither window is
+  shortened by a later call, and both are written to `.tesla-holds.json`
+  so a pm2 restart cannot clear them and send another `wake_up`.
+- `EXCEEDED_LIMIT` and HTTP 402 are the billing cap, not a 30-minute rate
+  limit. The dashboard shows **Billing limit** and does not wake.
+- Turning solar on does not call `wake_up`. If a hold is active, or the
+  last snapshot already shows the car online, it does not call Tesla at
+  all. Otherwise it reads `vehicle_data` once. `wake_up` runs only after
+  that read fails because the car is asleep.
 - On a billing-cap response (HTTP 402, or an error body about billing /
   payment / quota), `TESLA_API_BUDGET_MODE=auto` pauses paid calls for
   `TESLA_API_BUDGET_COOLDOWN_MS` (6 hours). Set the mode to `on` for the

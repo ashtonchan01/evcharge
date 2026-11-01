@@ -6,8 +6,9 @@
  * Streaming telemetry was the cheap path. Nothing in here may poll, wake, or
  * command faster than the configured recovery / command gaps. A single
  * explicit session probe (the user turned solar charging on) may run once
- * inside that gap. 403/429 still uses the full cooldown — this module does
- * not shorten it.
+ * inside that gap. A non-billing 403 still uses the full cooldown. Billing
+ * EXCEEDED_LIMIT / 402 does not. A session probe polls vehicle_data and
+ * does not call wake_up.
  */
 
 export type TeslaWait = "none" | "waking" | "asleep" | "rate_limited" | "budget" | "quiet_hours";
@@ -15,15 +16,17 @@ export type TeslaWait = "none" | "waking" | "asleep" | "rate_limited" | "budget"
 export type TeslaBlock = "billing" | "rate_limit";
 
 /**
- * 402 and billing-cap wording are a spending hold. Plain 403/429 stay on the
- * existing rate-limit cooldown (including Akamai "Access Denied" on token
- * refresh — that is not a billing-cap signal).
+ * EXCEEDED_LIMIT and HTTP 402 are the Fleet billing cap (budget hold).
+ * A plain 429 is a transient rate limit. A plain 403 (including Akamai
+ * "Access Denied" on token refresh) stays on the long rate-limit cooldown.
  */
 export function classifyTeslaBlock(status: number, message: string): TeslaBlock | null {
   const text = message.toLowerCase();
   if (
     status === 402 ||
-    /billing|payment required|quota exceeded|spending limit|monthly limit|developer billing|insufficient fund/.test(text)
+    /exceeded_limit|billing|payment required|quota exceeded|spending limit|monthly limit|developer billing|insufficient fund/.test(
+      text
+    )
   ) {
     return "billing";
   }
@@ -71,8 +74,12 @@ export interface RecoveryPlanInput {
   recoveryPollMs: number;
   rateLimitedUntil: number;
   budgetBlocked: boolean;
-  /** User just turned solar on and telemetry has no fresh hint. One poll + maybe one wake. */
+  /** User just turned solar on and telemetry has no fresh hint. One vehicle_data poll, no wake. */
   sessionProbePending: boolean;
+  /** Set after a hold. The next probe must not call wake_up. */
+  suppressWake?: boolean;
+  /** Last snapshot already showed the car online or charging. */
+  knownAwake?: boolean;
   quietHours: boolean;
   /** When the budget hold ends. 0 if the hold is indefinite (mode forced on). */
   budgetUntil: number;
@@ -123,9 +130,16 @@ export function planRecovery(input: RecoveryPlanInput): RecoveryPlan {
   const sinceWake =
     input.lastWakeAttemptAt <= 0 ? Number.POSITIVE_INFINITY : input.now - input.lastWakeAttemptAt;
   const pollDue = input.sessionProbePending || sincePoll >= gap;
-  // One wake per unreachable streak, throttled to the same gap. The session
-  // probe may wake once even mid-streak; it does not start a faster cadence.
-  const wakeDue = pollDue && (input.sessionProbePending || (input.consecutiveFailures === 0 && sinceWake >= gap));
+  // Never wake just because solar was turned on, just because a hold expired,
+  // or when we already know the car is online. Wake stays a follow-up to a
+  // failed vehicle_data read (see pollForRecovery), at most once per gap.
+  const wakeDue =
+    pollDue &&
+    !input.sessionProbePending &&
+    !input.suppressWake &&
+    !input.knownAwake &&
+    input.consecutiveFailures === 0 &&
+    sinceWake >= gap;
   const nextPollAt = input.lastFallbackAttemptAt <= 0 ? input.now : input.lastFallbackAttemptAt + gap;
   // "Waking" is only for a wake that has not been answered yet. A successful
   // poll (consecutiveFailures === 0) means the car already responded — the

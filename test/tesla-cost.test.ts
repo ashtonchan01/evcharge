@@ -8,6 +8,9 @@ process.env.TESLA_VEHICLE_TAG ??= "5YJ3TESTVIN000001";
 process.env.QUIET_HOURS_START ??= "";
 process.env.QUIET_HOURS_END ??= "";
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AddressInfo } from "node:net";
@@ -23,6 +26,11 @@ import {
 const FIVE_MIN = 300_000;
 const THIRTY_MIN = 1_800_000;
 
+function useFreshHoldsFile(): void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "evcharge-holds-"));
+  process.env.TESLA_HOLDS_PATH = path.join(dir, "holds.json");
+}
+
 describe("classifyTeslaBlock", () => {
   it("keeps plain 403 and 429 on the rate-limit path", () => {
     assert.equal(classifyTeslaBlock(403, "Tesla request GET /api/1/vehicles failed: HTTP 403"), "rate_limit");
@@ -33,6 +41,8 @@ describe("classifyTeslaBlock", () => {
   it("treats 402 and billing wording as a billing hold, not a shorter cooldown", () => {
     assert.equal(classifyTeslaBlock(402, "Payment Required"), "billing");
     assert.equal(classifyTeslaBlock(403, "developer billing spending limit reached"), "billing");
+    assert.equal(classifyTeslaBlock(403, '{"error":"EXCEEDED_LIMIT"}'), "billing");
+    assert.equal(classifyTeslaBlock(429, "EXCEEDED_LIMIT monthly limit"), "billing");
     assert.equal(classifyTeslaBlock(400, "vehicle unavailable"), null);
   });
 });
@@ -96,7 +106,7 @@ describe("planRecovery", () => {
   it("allows one poll when the user just enabled solar, and still will not poll twice inside the gap", () => {
     const probe = planRecovery({ ...base, sessionProbePending: true, consecutiveFailures: 4 });
     assert.equal(probe.shouldPoll, true);
-    assert.equal(probe.shouldWake, true);
+    assert.equal(probe.shouldWake, false);
     const again = planRecovery({ ...base, sessionProbePending: false, consecutiveFailures: 4 });
     assert.equal(again.shouldPoll, false);
     assert.equal(again.shouldWake, false);
@@ -164,6 +174,7 @@ describe("budgetBlocksPaidCalls", () => {
 
 describe("charge command dedup and cooldowns", () => {
   it("sends start and set_amps once, keeps the 30 minute 403 cooldown, and opens a billing hold", async () => {
+    useFreshHoldsFile();
     const { ChargeController } = await import("../src/controller/index.ts");
     const { TeslaApiError } = await import("../src/tesla/client.ts");
     const { config } = await import("../src/config.ts");
@@ -278,6 +289,7 @@ describe("charge command dedup and cooldowns", () => {
 
 describe("awake snapshot display", () => {
   it("does not stay on waking after a poll shows the car charging", async () => {
+    useFreshHoldsFile();
     const { ChargeController } = await import("../src/controller/index.ts");
 
     let polls = 0;
@@ -331,8 +343,84 @@ describe("awake snapshot display", () => {
   });
 });
 
+describe("persisted Tesla holds", () => {
+  it("reloads a rate-limit hold after restart and does not wake when solar is turned on", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    const { TeslaApiError } = await import("../src/tesla/client.ts");
+
+    let wakes = 0;
+    let polls = 0;
+    const goodwe = {
+      async getSnapshot() {
+        return {
+          timestamp: new Date(),
+          pvPowerW: 3000,
+          loadPowerW: 400,
+          gridPowerW: -2600,
+          batteryPowerW: 0,
+          batterySoc: 0,
+        };
+      },
+    };
+    const tesla = {
+      getVehicleTag: () => "5YJ3F7EA5KF461091",
+      setVehicleTag() {},
+      async getChargeState() {
+        polls += 1;
+        throw new TeslaApiError('{"error":"EXCEEDED_LIMIT"}', 403);
+      },
+      async wakeUp() {
+        wakes += 1;
+      },
+      async startCharging() {},
+      async stopCharging() {},
+      async setChargeAmps() {},
+    };
+
+    const first = new ChargeController(goodwe as never, tesla as never, null);
+    first.observeTeslaError("wake_up", new TeslaApiError('{"error":"EXCEEDED_LIMIT"}', 403));
+    const status = first.getStatus();
+    assert.equal(status.teslaWait, "budget");
+    assert.equal(status.apiBudgetActive, true);
+    assert.equal(status.rateLimitedUntil, null);
+
+    const restarted = new ChargeController(goodwe as never, tesla as never, null);
+    assert.equal(restarted.getStatus().teslaWait, "budget");
+    assert.equal(restarted.getStatus().apiBudgetActive, true);
+    restarted.setEnabled(true, "test");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(wakes, 0);
+    assert.equal(polls, 0);
+  });
+
+  it("treats a plain 429 as a short persisted pause and still will not wake", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    const { TeslaApiError } = await import("../src/tesla/client.ts");
+    const { config } = await import("../src/config.ts");
+
+    const controller = new ChargeController({} as never, { getVehicleTag: () => "VIN", setVehicleTag() {} } as never, null);
+    const before = Date.now();
+    controller.observeTeslaError("vehicle_data", new TeslaApiError("HTTP 429 too many requests", 429));
+    const until = controller.getStatus().rateLimitedUntil?.getTime() ?? 0;
+    assert.ok(until - before >= config.tesla.transientRateLimitCooldownMs - 50);
+    assert.ok(until - before < config.tesla.rateLimitCooldownMs - 60_000);
+    assert.equal(controller.getStatus().teslaWait, "rate_limited");
+
+    const restarted = new ChargeController(
+      {} as never,
+      { getVehicleTag: () => "VIN", setVehicleTag() {} } as never,
+      null
+    );
+    const reloaded = restarted.getStatus().rateLimitedUntil?.getTime() ?? 0;
+    assert.ok(Math.abs(reloaded - until) < 5);
+  });
+});
+
 describe("GET /api/vehicles cache", () => {
   it("does not call Tesla again on a warm cache or during a 429 cooldown", async () => {
+    useFreshHoldsFile();
     const { ChargeController } = await import("../src/controller/index.ts");
     const { TeslaApiError } = await import("../src/tesla/client.ts");
     const { createApp } = await import("../src/server/index.ts");

@@ -20,7 +20,7 @@ function publicTeslaError(err: unknown): string {
     return err.status === 429 ? "Tesla rate limited the account" : "Tesla rejected the request (403)";
   }
   const message = err instanceof Error ? err.message : String(err);
-  if (/billing|payment required|quota exceeded|spending limit/i.test(message)) return "Tesla billing limit";
+  if (/exceeded_limit|billing|payment required|quota exceeded|spending limit/i.test(message)) return "Tesla billing limit";
   return message.replace(/\s+/g, " ").slice(0, 180);
 }
 
