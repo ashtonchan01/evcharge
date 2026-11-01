@@ -124,18 +124,7 @@ function decisionView(status) {
     waiting_for_stability: "Waiting for stability",
     unavailable: "Unavailable",
   };
-  let note = status.statusNote || "";
-  if (
-    !note &&
-    !chargingNow &&
-    !onlineNow &&
-    status.telemetryEnabled &&
-    !status.telemetryLastSeenAt &&
-    status.override &&
-    status.override.enabled
-  ) {
-    note = "No streaming telemetry — not spending extra Tesla polls";
-  }
+  const note = status.statusNote || "";
   return {
     cls: status.decision || "unavailable",
     label: labels[status.decision] || String(status.decision || "Unavailable").replace(/_/g, " "),
