@@ -90,6 +90,13 @@ function decisionView(status) {
         : "Paid Tesla calls paused. Turn solar off and on for one try.",
     };
   }
+  if (status.teslaWait === "auth") {
+    return {
+      cls: "rate_limited",
+      label: "Tesla auth failed",
+      note: countdown ? `Not a vehicle rate limit · retry in ${countdown}` : "Token host rejected the refresh",
+    };
+  }
   if (status.teslaWait === "rate_limited" || rateUntil > now) {
     const left = Math.max(0, Math.round(((rateUntil || nextAt) - now) / 1000));
     return { cls: "rate_limited", label: "Rate limited", note: `Tesla paused · retry in ${fmtDuration(left)}` };

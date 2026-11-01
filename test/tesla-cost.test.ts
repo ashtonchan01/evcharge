@@ -35,7 +35,11 @@ describe("classifyTeslaBlock", () => {
   it("keeps plain 403 and 429 on the rate-limit path", () => {
     assert.equal(classifyTeslaBlock(403, "Tesla request GET /api/1/vehicles failed: HTTP 403"), "rate_limit");
     assert.equal(classifyTeslaBlock(429, "too many requests"), "rate_limit");
-    assert.equal(classifyTeslaBlock(403, "Access Denied You don't have permission"), "rate_limit");
+    assert.equal(classifyTeslaBlock(403, "Access Denied You don't have permission"), "auth");
+    assert.equal(
+      classifyTeslaBlock(403, "Tesla token refresh failed: HTTP 403 <HTML><TITLE>Access Denied</TITLE>"),
+      "auth"
+    );
   });
 
   it("treats 402 and billing wording as a billing hold, not a shorter cooldown", () => {
@@ -415,6 +419,35 @@ describe("persisted Tesla holds", () => {
     );
     const reloaded = restarted.getStatus().rateLimitedUntil?.getTime() ?? 0;
     assert.ok(Math.abs(reloaded - until) < 5);
+  });
+});
+
+describe("auth edge 403", () => {
+  it("does not start a 30 minute rate-limit hold for an Access Denied token refresh", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    const { TeslaApiError } = await import("../src/tesla/client.ts");
+    const { config } = await import("../src/config.ts");
+
+    const controller = new ChargeController({} as never, { getVehicleTag: () => "VIN", setVehicleTag() {} } as never, null);
+    const before = Date.now();
+    controller.observeTeslaError(
+      "token refresh",
+      new TeslaApiError("Tesla token refresh failed: HTTP 403 <HTML><TITLE>Access Denied</TITLE></HTML>", 403)
+    );
+    const status = controller.getStatus();
+    assert.equal(status.teslaWait, "auth");
+    assert.equal(status.rateLimitedUntil, null);
+    const until = status.nextTeslaAttemptAt?.getTime() ?? 0;
+    assert.ok(until - before >= config.tesla.authFailureCooldownMs - 50);
+    assert.ok(until - before < config.tesla.rateLimitCooldownMs - 60_000);
+
+    const restarted = new ChargeController(
+      {} as never,
+      { getVehicleTag: () => "VIN", setVehicleTag() {} } as never,
+      null
+    );
+    assert.equal(restarted.getStatus().teslaWait, "auth");
   });
 });
 

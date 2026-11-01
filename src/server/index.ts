@@ -16,11 +16,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VEHICLE_LIST_CACHE_MS = 10 * 60 * 1000;
 
 function publicTeslaError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/access denied|<html|edgesuite/i.test(message)) return "Tesla auth failed (not a vehicle rate limit)";
+  if (/exceeded_limit|billing|payment required|quota exceeded|spending limit/i.test(message)) return "Tesla billing limit";
   if (err instanceof TeslaApiError && (err.status === 403 || err.status === 429)) {
     return err.status === 429 ? "Tesla rate limited the account" : "Tesla rejected the request (403)";
   }
-  const message = err instanceof Error ? err.message : String(err);
-  if (/exceeded_limit|billing|payment required|quota exceeded|spending limit/i.test(message)) return "Tesla billing limit";
   return message.replace(/\s+/g, " ").slice(0, 180);
 }
 
@@ -38,6 +39,7 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
   app.get("/api/vehicles", async (_req, res) => {
     const status = controller.getStatus();
     const rateLimited = status.rateLimitedUntil !== null && new Date(status.rateLimitedUntil).getTime() > Date.now();
+    const authPaused = status.teslaWait === "auth";
     const cachedBody = () => ({
       vehicles: vehicleCache?.vehicles ?? [],
       stale: true,
@@ -46,10 +48,14 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
 
     // A phone refresh must not spend a Fleet API call during a hold, and a
     // warm cache answers repeat loads without listing vehicles again.
-    if (rateLimited || status.apiBudgetActive) {
-      res.status(rateLimited ? 429 : 200).json({
+    if (rateLimited || authPaused || status.apiBudgetActive) {
+      res.status(rateLimited || authPaused ? 429 : 200).json({
         ...cachedBody(),
-        error: rateLimited ? "Tesla rate limit cooldown" : "Tesla paid calls paused",
+        error: authPaused
+          ? "Tesla auth failed"
+          : rateLimited
+            ? "Tesla rate limit cooldown"
+            : "Tesla paid calls paused",
         rateLimitedUntil: status.rateLimitedUntil,
       });
       return;
@@ -156,11 +162,14 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
 
     const held = controller.getStatus();
     const rateLimited = held.rateLimitedUntil !== null && new Date(held.rateLimitedUntil).getTime() > Date.now();
-    if (rateLimited || held.apiBudgetActive) {
+    if (rateLimited || held.teslaWait === "auth" || held.apiBudgetActive) {
       res.status(429).json({
-        error: rateLimited
-          ? "Tesla rate limit cooldown — charge limit not sent"
-          : "Tesla billing limit — charge limit not sent",
+        error:
+          held.teslaWait === "auth"
+            ? "Tesla auth failed — charge limit not sent"
+            : rateLimited
+              ? "Tesla rate limit cooldown — charge limit not sent"
+              : "Tesla billing limit — charge limit not sent",
         rateLimitedUntil: held.rateLimitedUntil,
       });
       return;

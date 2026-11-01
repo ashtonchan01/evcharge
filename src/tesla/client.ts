@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { logger } from "../util/logger.js";
 import { teslaCommandFailureReason } from "./commandResult.js";
 import { vehicleLabel } from "../vehicleLabel.js";
+import { describeTeslaHttpBody, resolveFleetAuthUrl } from "./authUrl.js";
 
 const log = logger.child({ module: "tesla" });
 
@@ -21,7 +22,6 @@ export class TeslaApiError extends Error {
   }
 }
 
-const TESLA_AUTH_URL = "https://auth.tesla.com/oauth2/v3/token";
 const REQUEST_TIMEOUT_MS = 20_000;
 
 async function fetchWithTimeout(url: string, init: Record<string, unknown>): Promise<Response> {
@@ -125,8 +125,9 @@ export class TeslaFleetClient {
   }
 
   private async refreshAccessToken(): Promise<string> {
-    log.debug("Refreshing Tesla access token");
-    const res = await fetchWithTimeout(TESLA_AUTH_URL, {
+    const authUrl = resolveFleetAuthUrl(config.tesla.authUrl);
+    log.debug({ authUrl }, "Refreshing Tesla access token");
+    const res = await fetchWithTimeout(authUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -144,10 +145,9 @@ export class TeslaFleetClient {
 
     if (!res.ok) {
       const text = await res.text();
-      // Preserve the HTTP status so 403/429 (including the auth-edge
-      // "Access Denied" page) trip the same cooldown as a vehicle call
-      // instead of being retried every poll.
-      throw new TeslaApiError(`Tesla token refresh failed: HTTP ${res.status} ${text}`, res.status);
+      const body = describeTeslaHttpBody(text);
+      log.error({ status: res.status, authUrl, body }, "Tesla token refresh failed");
+      throw new TeslaApiError(`Tesla token refresh failed: HTTP ${res.status} ${body}`, res.status);
     }
 
     const body = (await res.json()) as { access_token: string; refresh_token?: string };
@@ -221,7 +221,9 @@ export class TeslaFleetClient {
     }
 
     if (!res.ok) {
-      throw new TeslaApiError(`Tesla request ${method} ${path} failed: HTTP ${res.status} ${text}`, res.status);
+      const body = describeTeslaHttpBody(text);
+      log.error({ status: res.status, method, path, body }, "Tesla vehicle request failed");
+      throw new TeslaApiError(`Tesla request ${method} ${path} failed: HTTP ${res.status} ${body}`, res.status);
     }
 
     return parsed as T;
