@@ -69,7 +69,7 @@ know because commands fail with "Tesla Vehicle Command Protocol required."
 4. Register your app with Tesla's Fleet API for your region (one-time, using
    an app-level `client_credentials` token, not your personal login):
    ```
-   curl -s -X POST https://auth.tesla.com/oauth2/v3/token -d "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET&scope=vehicle_device_data%20vehicle_cmds%20vehicle_charging_cmds&audience=YOUR_FLEET_API_BASE_URL" > app_token.json
+   curl -s -X POST https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token -d "grant_type=client_credentials&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET&scope=vehicle_device_data%20vehicle_cmds%20vehicle_charging_cmds&audience=YOUR_FLEET_API_BASE_URL" > app_token.json
    curl -s -X POST YOUR_FLEET_API_BASE_URL/api/1/partner_accounts -H "Authorization: Bearer $(python3 -c "import json;print(json.load(open('app_token.json'))['access_token'])")" -H "Content-Type: application/json" -d '{"domain":"yourdomain"}'
    ```
 5. Pair the virtual key: on your phone, visit `https://tesla.com/_ak/yourdomain`
@@ -158,14 +158,12 @@ depends on it being sslip.io specifically.
      returns `400 "This endpoint must be called through the Vehicle
      Command HTTP Proxy"`. Since the proxy only binds to localhost, run
      this `curl` from the same box the proxy runs on.
-   - Getting the user token itself (`grant_type=refresh_token` against
-     `auth.tesla.com/oauth2/v3/token`) can get blocked by Tesla's WAF from
-     a non-browser TLS fingerprint (Node's `fetch`, plain `curl`) even
-     though the same request works fine from a real browser. If you hit an
-     `Access Denied` HTML response instead of a JSON token, use Python's
-     `curl_cffi` (`pip3 install curl_cffi`) with `impersonate="chrome"`
-     instead of `curl`/`requests` for this one call - it presents a real
-     Chrome TLS fingerprint and sails through.
+   - Refresh the user token against **fleet-auth**, not `auth.tesla.com`.
+     The app posts to `https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token`
+     (`TESLA_AUTH_URL`). `auth.tesla.com` is the consumer login edge; from
+     the Oracle VM it returns an Akamai HTML 403 in tens of milliseconds.
+     That is an auth denial, not a vehicle rate limit. The browser login
+     page can still be `auth.tesla.com`; only the token POST moves.
    ```
    curl -sk -X POST https://localhost:PROXY_PORT/api/1/vehicles/fleet_telemetry_config \
      -H "Authorization: Bearer $USER_OAUTH_ACCESS_TOKEN" \

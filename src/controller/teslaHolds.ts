@@ -8,6 +8,7 @@ const log = logger.child({ module: "tesla-holds" });
 export interface PersistedTeslaHolds {
   rateLimitedUntil: number;
   budgetUntil: number;
+  authPausedUntil: number;
   /** After a 403/429/billing hold, the next contact is vehicle_data, not wake_up. */
   suppressWake: boolean;
   vehicle: VehicleChargeState | null;
@@ -16,6 +17,7 @@ export interface PersistedTeslaHolds {
 const EMPTY: PersistedTeslaHolds = {
   rateLimitedUntil: 0,
   budgetUntil: 0,
+  authPausedUntil: 0,
   suppressWake: false,
   vehicle: null,
 };
@@ -51,6 +53,7 @@ export function loadTeslaHolds(): PersistedTeslaHolds {
     return {
       rateLimitedUntil: Number(parsed.rateLimitedUntil) || 0,
       budgetUntil: Number(parsed.budgetUntil) || 0,
+      authPausedUntil: Number(parsed.authPausedUntil) || 0,
       suppressWake: Boolean(parsed.suppressWake),
       vehicle: restored,
     };
@@ -64,6 +67,7 @@ export function saveTeslaHolds(holds: PersistedTeslaHolds): void {
   const body = JSON.stringify({
     rateLimitedUntil: holds.rateLimitedUntil,
     budgetUntil: holds.budgetUntil,
+    authPausedUntil: holds.authPausedUntil,
     suppressWake: holds.suppressWake,
     vehicle: holds.vehicle
       ? { ...holds.vehicle, timestamp: holds.vehicle.timestamp.toISOString() }

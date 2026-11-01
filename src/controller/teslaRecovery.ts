@@ -11,14 +11,14 @@
  * does not call wake_up.
  */
 
-export type TeslaWait = "none" | "waking" | "asleep" | "rate_limited" | "budget" | "quiet_hours";
+export type TeslaWait = "none" | "waking" | "asleep" | "rate_limited" | "budget" | "auth" | "quiet_hours";
 
-export type TeslaBlock = "billing" | "rate_limit";
+export type TeslaBlock = "billing" | "rate_limit" | "auth";
 
 /**
- * EXCEEDED_LIMIT and HTTP 402 are the Fleet billing cap (budget hold).
- * A plain 429 is a transient rate limit. A plain 403 (including Akamai
- * "Access Denied" on token refresh) stays on the long rate-limit cooldown.
+ * EXCEEDED_LIMIT and HTTP 402 are the Fleet billing cap.
+ * HTML "Access Denied" is the auth edge (auth.tesla.com WAF), not a vehicle rate limit.
+ * A plain 429 is a transient rate limit. Other 403s keep the long cooldown.
  */
 export function classifyTeslaBlock(status: number, message: string): TeslaBlock | null {
   const text = message.toLowerCase();
@@ -29,6 +29,9 @@ export function classifyTeslaBlock(status: number, message: string): TeslaBlock 
     )
   ) {
     return "billing";
+  }
+  if (status === 403 && (/access denied/.test(text) || /<html/.test(text) || /edgesuite/.test(text))) {
+    return "auth";
   }
   if (status === 403 || status === 429) return "rate_limit";
   return null;
@@ -73,6 +76,7 @@ export interface RecoveryPlanInput {
   consecutiveFailures: number;
   recoveryPollMs: number;
   rateLimitedUntil: number;
+  authPausedUntil?: number;
   budgetBlocked: boolean;
   /** User just turned solar on and telemetry has no fresh hint. One vehicle_data poll, no wake. */
   sessionProbePending: boolean;
@@ -105,6 +109,14 @@ export function planRecovery(input: RecoveryPlanInput): RecoveryPlan {
       shouldWake: false,
       wait: "rate_limited",
       nextAttemptAt: input.rateLimitedUntil,
+    };
+  }
+  if ((input.authPausedUntil ?? 0) > input.now) {
+    return {
+      shouldPoll: false,
+      shouldWake: false,
+      wait: "auth",
+      nextAttemptAt: input.authPausedUntil ?? null,
     };
   }
   if (input.budgetBlocked) {

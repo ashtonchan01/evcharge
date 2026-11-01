@@ -26,6 +26,9 @@ const schema = z.object({
   GOODWE_SEMS_BASE_URL: z.string().default("https://www.semsportal.com/api"),
 
   TESLA_FLEET_API_BASE_URL: z.string().default("https://fleet-api.prd.na.vehicle-command.psf.tesla.com"),
+  // Fleet token endpoint. Do not point this at auth.tesla.com — that host
+  // WAF-blocks the VM and the 403 was misread as a 30-minute vehicle rate limit.
+  TESLA_AUTH_URL: z.string().default("https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token"),
   TESLA_CLIENT_ID: z.string().min(1),
   TESLA_CLIENT_SECRET: z.string().min(1),
   TESLA_REFRESH_TOKEN: z.string().min(1),
@@ -77,6 +80,9 @@ const schema = z.object({
   // Transient HTTP 429 only. One vehicle_data probe after this, not a wake.
   // Persisted the same way so a restart does not start a fresh timer.
   TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS: numeric().default("300000"),
+  // Akamai/HTML "Access Denied" on the token endpoint. Short, persisted,
+  // and labeled as auth — not the 30-minute vehicle rate-limit hold.
+  TESLA_AUTH_FAILURE_COOLDOWN_MS: numeric().default("120000"),
   // Minimum gap between repeated charge_start / charge_stop / set_charging_amps
   // calls. The control loop used to send those every poll while the car's
   // reported state lagged, which is most of the Oct 2026 command bill.
@@ -148,6 +154,7 @@ export const config = {
 
   tesla: {
     baseUrl: env.TESLA_FLEET_API_BASE_URL,
+    authUrl: env.TESLA_AUTH_URL,
     clientId: env.TESLA_CLIENT_ID,
     clientSecret: env.TESLA_CLIENT_SECRET,
     refreshToken: env.TESLA_REFRESH_TOKEN,
@@ -161,6 +168,7 @@ export const config = {
     telemetryRecoveryPollMs: env.TESLA_TELEMETRY_RECOVERY_POLL_MS!,
     rateLimitCooldownMs: env.TESLA_RATE_LIMIT_COOLDOWN_MS!,
     transientRateLimitCooldownMs: env.TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS!,
+    authFailureCooldownMs: env.TESLA_AUTH_FAILURE_COOLDOWN_MS!,
     commandMinIntervalMs: env.TESLA_COMMAND_MIN_INTERVAL_MS!,
     apiBudgetMode: env.TESLA_API_BUDGET_MODE,
     apiBudgetCooldownMs: env.TESLA_API_BUDGET_COOLDOWN_MS!,

@@ -122,6 +122,8 @@ export class ChargeController extends EventEmitter {
   // retrying every cycle into an account-level block that retrying won't
   // clear any faster.
   private rateLimitedUntil = 0;
+  /** Auth-edge HTML 403 (not a vehicle rate limit). Short persisted pause. */
+  private authPausedUntil = 0;
   /** After a persisted hold, the next Tesla call is vehicle_data, never wake_up. */
   private suppressWake = false;
   // Charge limit just accepted by the car. Telemetry's ChargeLimitSoc is
@@ -146,25 +148,29 @@ export class ChargeController extends EventEmitter {
     const now = Date.now();
     if (saved.rateLimitedUntil > now) this.rateLimitedUntil = saved.rateLimitedUntil;
     if (saved.budgetUntil > now) this.budgetUntil = saved.budgetUntil;
-    this.suppressWake = saved.suppressWake || saved.rateLimitedUntil > now || saved.budgetUntil > now;
+    if (saved.authPausedUntil > now) this.authPausedUntil = saved.authPausedUntil;
+    this.suppressWake =
+      saved.suppressWake || saved.rateLimitedUntil > now || saved.budgetUntil > now || saved.authPausedUntil > now;
     if (saved.vehicle) {
       this.lastPolledVehicle = saved.vehicle;
       this.status.vehicle = saved.vehicle;
     }
-    if (this.rateLimitedUntil > now || this.budgetHoldActive()) this.publishBlockStatus();
+    if (this.rateLimitedUntil > now || this.authPausedUntil > now || this.budgetHoldActive()) this.publishBlockStatus();
   }
 
   private persistHolds(): void {
     saveTeslaHolds({
       rateLimitedUntil: this.rateLimitedUntil,
       budgetUntil: this.budgetUntil,
+      authPausedUntil: this.authPausedUntil,
       suppressWake: this.suppressWake,
       vehicle: this.lastPolledVehicle,
     });
   }
 
   private paidHoldActive(): boolean {
-    return Date.now() < this.rateLimitedUntil || this.budgetHoldActive();
+    const now = Date.now();
+    return now < this.rateLimitedUntil || now < this.authPausedUntil || this.budgetHoldActive();
   }
 
   private recentlyAwake(): boolean {
@@ -241,17 +247,46 @@ export class ChargeController extends EventEmitter {
     this.emitUpdate();
   }
 
+  /**
+   * Token host returned an auth-edge denial (HTML Access Denied), not a
+   * vehicle 429 and not EXCEEDED_LIMIT. Short pause so we don't hammer,
+   * labeled as auth so it is not a 30-minute rate-limit hold.
+   */
+  noteAuthFailure(source: string, detail: string): void {
+    const until = Date.now() + config.tesla.authFailureCooldownMs;
+    if (until <= this.authPausedUntil) return;
+    this.authPausedUntil = until;
+    this.sessionCredit = false;
+    this.sessionBundleOpen = false;
+    this.sessionProbePending = false;
+    this.suppressWake = true;
+    this.haveFreshControlState = false;
+    this.status.lastError = `Tesla auth failed: ${detail}`;
+    log.error(
+      { source, cooldownMs: config.tesla.authFailureCooldownMs, until: new Date(until), detail },
+      "Tesla auth failed — not a vehicle rate limit and not a billing cap"
+    );
+    this.persistHolds();
+    this.publishBlockStatus();
+    this.emitUpdate();
+  }
+
   /** Classify a Tesla client error and apply the matching hold. */
   observeTeslaError(source: string, err: unknown): void {
     if (!(err instanceof TeslaApiError)) return;
     const kind = classifyTeslaBlock(err.status, err.message);
+    log.error({ source, status: err.status, kind, body: err.message }, "Tesla call failed");
     if (kind === "billing") {
       if (config.tesla.apiBudgetMode === "off") this.noteRateLimit(source);
       else this.noteBillingLimit(source);
       return;
     }
+    if (kind === "auth") {
+      this.noteAuthFailure(source, err.message);
+      return;
+    }
     if (kind !== "rate_limit") return;
-    // 429 is a transient throttle. 403 (account / auth-edge) keeps the long cooldown.
+    // 429 is a transient throttle. A non-auth 403 keeps the long cooldown.
     // Neither path calls wake_up to "check again".
     const cooldown = err.status === 429 ? config.tesla.transientRateLimitCooldownMs : config.tesla.rateLimitCooldownMs;
     this.noteRateLimit(source, cooldown);
@@ -412,6 +447,7 @@ export class ChargeController extends EventEmitter {
     if (
       this.status.teslaWait === "rate_limited" ||
       this.status.teslaWait === "budget" ||
+      this.status.teslaWait === "auth" ||
       this.status.teslaWait === "quiet_hours"
     ) {
       return;
@@ -496,7 +532,7 @@ export class ChargeController extends EventEmitter {
 
       if (chargingPollDue && this.armPaidCall()) {
         const polled = await this.pollDirect();
-        if (Date.now() < this.rateLimitedUntil) {
+        if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil) {
           this.haveFreshControlState = false;
           this.publishBlockStatus();
           return this.lastPolledVehicle;
@@ -548,7 +584,7 @@ export class ChargeController extends EventEmitter {
 
   /** True if a billed call may proceed. Consumes the one-shot session credit. */
   private armPaidCall(): boolean {
-    if (Date.now() < this.rateLimitedUntil) return false;
+    if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil) return false;
     if (
       budgetBlocksPaidCalls({
         mode: config.tesla.apiBudgetMode,
@@ -577,6 +613,7 @@ export class ChargeController extends EventEmitter {
       consecutiveFailures: this.consecutiveFailures,
       recoveryPollMs: config.tesla.telemetryRecoveryPollMs,
       rateLimitedUntil: this.rateLimitedUntil,
+      authPausedUntil: this.authPausedUntil,
       budgetBlocked: budgetBlocksPaidCalls({
         mode: config.tesla.apiBudgetMode,
         now,
@@ -595,6 +632,7 @@ export class ChargeController extends EventEmitter {
   private publishBlockStatus(): void {
     const now = Date.now();
     const rateUntil = this.rateLimitedUntil > now ? this.rateLimitedUntil : 0;
+    const authUntil = this.authPausedUntil > now ? this.authPausedUntil : 0;
     const budget = this.budgetHoldActive();
     const budgetUntil = budget && this.budgetUntil > now ? this.budgetUntil : 0;
     this.status.apiBudgetActive = budget;
@@ -606,22 +644,28 @@ export class ChargeController extends EventEmitter {
 
     // Count down to whichever hold actually ends last. A billing pause must
     // not replace a 403/429 window with a shorter one, and a 403 window must
-    // not hide a longer billing pause.
-    const effectiveUntil = Math.max(rateUntil, budgetUntil);
-    const showBudget = budget && (config.tesla.apiBudgetMode === "on" || budgetUntil >= rateUntil);
+    // not hide a longer billing pause. An auth-edge denial is labeled auth,
+    // not rate limited.
+    const effectiveUntil = Math.max(rateUntil, budgetUntil, authUntil);
+    const showBudget = budget && (config.tesla.apiBudgetMode === "on" || budgetUntil >= Math.max(rateUntil, authUntil));
     if (showBudget) {
       this.status.teslaWait = "budget";
       this.status.nextTeslaAttemptAt = effectiveUntil > now ? new Date(effectiveUntil) : null;
       return;
     }
-    if (rateUntil) {
+    if (rateUntil && rateUntil >= authUntil) {
       this.status.teslaWait = "rate_limited";
       this.status.nextTeslaAttemptAt = new Date(rateUntil);
+      return;
+    }
+    if (authUntil) {
+      this.status.teslaWait = "auth";
+      this.status.nextTeslaAttemptAt = new Date(authUntil);
     }
   }
 
   private publishTeslaWait(plan: RecoveryPlan): void {
-    if (plan.wait === "rate_limited" || plan.wait === "budget") {
+    if (plan.wait === "rate_limited" || plan.wait === "budget" || plan.wait === "auth") {
       this.publishBlockStatus();
       if (plan.wait === "budget" && plan.nextAttemptAt) {
         this.status.nextTeslaAttemptAt = new Date(plan.nextAttemptAt);
@@ -653,7 +697,7 @@ export class ChargeController extends EventEmitter {
     this.sessionProbePending = false;
 
     const polled = await this.pollDirect();
-    if (Date.now() < this.rateLimitedUntil || this.budgetHoldActive()) {
+    if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil || this.budgetHoldActive()) {
       this.haveFreshControlState = false;
       this.suppressWake = true;
       this.persistHolds();
@@ -676,7 +720,7 @@ export class ChargeController extends EventEmitter {
     // previous answer was a 403/429.
     if (!this.suppressWake && !this.recentlyAwake() && this.wakeGapElapsed()) {
       await this.wakeOnce();
-      if (Date.now() < this.rateLimitedUntil || this.budgetHoldActive()) {
+      if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil || this.budgetHoldActive()) {
         this.haveFreshControlState = false;
         this.suppressWake = true;
         this.persistHolds();
@@ -819,7 +863,7 @@ export class ChargeController extends EventEmitter {
       return;
     }
 
-    if (Date.now() < this.rateLimitedUntil) {
+    if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil) {
       // Don't issue commands (stop/start/set-amps) off a stale cached
       // vehicle reading either - those are Tesla calls too, and firing
       // them into an active cooldown just adds more blocked requests.
