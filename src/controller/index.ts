@@ -14,6 +14,7 @@ import {
   RecoveryPlan,
   TeslaWait,
 } from "./teslaRecovery.js";
+import { loadTeslaHolds, saveTeslaHolds } from "./teslaHolds.js";
 
 const log = logger.child({ module: "controller" });
 
@@ -121,6 +122,8 @@ export class ChargeController extends EventEmitter {
   // retrying every cycle into an account-level block that retrying won't
   // clear any faster.
   private rateLimitedUntil = 0;
+  /** After a persisted hold, the next Tesla call is vehicle_data, never wake_up. */
+  private suppressWake = false;
   // Charge limit just accepted by the car. Telemetry's ChargeLimitSoc is
   // pushed on a long interval, and an in-flight poll can still be holding
   // the previous percent — keep showing the commanded value until a
@@ -135,6 +138,46 @@ export class ChargeController extends EventEmitter {
     super();
     this.status.vehicleTag = tesla.getVehicleTag();
     this.status.telemetryEnabled = telemetry !== null;
+    this.restoreHolds();
+  }
+
+  private restoreHolds(): void {
+    const saved = loadTeslaHolds();
+    const now = Date.now();
+    if (saved.rateLimitedUntil > now) this.rateLimitedUntil = saved.rateLimitedUntil;
+    if (saved.budgetUntil > now) this.budgetUntil = saved.budgetUntil;
+    this.suppressWake = saved.suppressWake || saved.rateLimitedUntil > now || saved.budgetUntil > now;
+    if (saved.vehicle) {
+      this.lastPolledVehicle = saved.vehicle;
+      this.status.vehicle = saved.vehicle;
+    }
+    if (this.rateLimitedUntil > now || this.budgetHoldActive()) this.publishBlockStatus();
+  }
+
+  private persistHolds(): void {
+    saveTeslaHolds({
+      rateLimitedUntil: this.rateLimitedUntil,
+      budgetUntil: this.budgetUntil,
+      suppressWake: this.suppressWake,
+      vehicle: this.lastPolledVehicle,
+    });
+  }
+
+  private paidHoldActive(): boolean {
+    return Date.now() < this.rateLimitedUntil || this.budgetHoldActive();
+  }
+
+  private recentlyAwake(): boolean {
+    const vehicle = this.lastPolledVehicle;
+    if (!vehicle || !chargeSnapshotIsAwake(vehicle)) return false;
+    const age = Date.now() - new Date(vehicle.timestamp).getTime();
+    const windowMs = Math.max(config.tesla.telemetryRecoveryPollMs, config.tesla.telemetryStaleMs);
+    return age >= -5_000 && age <= windowMs;
+  }
+
+  private telemetryFreshNow(): boolean {
+    const hint = this.telemetry?.getHint(this.tesla.getVehicleTag());
+    return this.isHintFresh(hint, Date.now());
   }
 
   getStatus(): ControllerStatus {
@@ -155,18 +198,20 @@ export class ChargeController extends EventEmitter {
    * shorten a cooldown that's already running — retrying sooner is what
    * extended the July 2026 account block.
    */
-  noteRateLimit(source: string): void {
-    const until = Date.now() + config.tesla.rateLimitCooldownMs;
+  noteRateLimit(source: string, cooldownMs = config.tesla.rateLimitCooldownMs): void {
+    const until = Date.now() + cooldownMs;
     if (until <= this.rateLimitedUntil) return;
     this.rateLimitedUntil = until;
     this.haveFreshControlState = false;
     this.sessionCredit = false;
     this.sessionBundleOpen = false;
     this.sessionProbePending = false;
+    this.suppressWake = true;
     log.error(
-      { source, cooldownMs: config.tesla.rateLimitCooldownMs, until: new Date(until) },
-      "Tesla rejected the request with 403/429 - pausing ALL Tesla calls (reads, commands, wake_up) for the cooldown period"
+      { source, cooldownMs, until: new Date(until) },
+      "Tesla rate limit — pausing ALL Tesla calls (reads, commands, wake_up). The hold is persisted across restarts."
     );
+    this.persistHolds();
     this.publishBlockStatus();
     this.emitUpdate();
   }
@@ -186,10 +231,12 @@ export class ChargeController extends EventEmitter {
     this.sessionBundleOpen = false;
     this.sessionProbePending = false;
     this.haveFreshControlState = false;
+    this.suppressWake = true;
     log.error(
       { source, cooldownMs: config.tesla.apiBudgetCooldownMs, until: new Date(this.budgetUntil) },
       "Tesla billing cap — pausing paid Fleet API calls"
     );
+    this.persistHolds();
     this.publishBlockStatus();
     this.emitUpdate();
   }
@@ -197,8 +244,17 @@ export class ChargeController extends EventEmitter {
   /** Classify a Tesla client error and apply the matching hold. */
   observeTeslaError(source: string, err: unknown): void {
     if (!(err instanceof TeslaApiError)) return;
-    if (err.status === 403 || err.status === 429) this.noteRateLimit(source);
-    if (classifyTeslaBlock(err.status, err.message) === "billing") this.noteBillingLimit(source);
+    const kind = classifyTeslaBlock(err.status, err.message);
+    if (kind === "billing") {
+      if (config.tesla.apiBudgetMode === "off") this.noteRateLimit(source);
+      else this.noteBillingLimit(source);
+      return;
+    }
+    if (kind !== "rate_limit") return;
+    // 429 is a transient throttle. 403 (account / auth-edge) keeps the long cooldown.
+    // Neither path calls wake_up to "check again".
+    const cooldown = err.status === 429 ? config.tesla.transientRateLimitCooldownMs : config.tesla.rateLimitCooldownMs;
+    this.noteRateLimit(source, cooldown);
   }
 
   stop(): void {
@@ -212,12 +268,13 @@ export class ChargeController extends EventEmitter {
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
     if (enabled) {
-      // One explicit session attempt. Does not clear the 5 minute gaps, so
-      // steady-state poll/wake/command rates stay where they were — except
-      // this single probe, which is allowed inside the gap.
-      this.sessionCredit = true;
-      this.sessionProbePending = true;
-      this.explicitSession = true;
+      // Do not wake, and do not spend a paid probe, when a hold is active
+      // or the last snapshot already shows the car online. A probe is one
+      // vehicle_data read — never a leading wake_up.
+      const held = this.paidHoldActive();
+      this.sessionCredit = false;
+      this.explicitSession = !held;
+      this.sessionProbePending = !held && !this.telemetryFreshNow() && !this.recentlyAwake();
     } else {
       this.sessionCredit = false;
       this.sessionProbePending = false;
@@ -245,9 +302,10 @@ export class ChargeController extends EventEmitter {
     this.consecutiveFailures = 0;
     this.lastCommandedAmps = null;
     if (this.status.override.enabled) {
-      this.sessionCredit = true;
-      this.sessionProbePending = true;
-      this.explicitSession = true;
+      const held = this.paidHoldActive();
+      this.sessionCredit = false;
+      this.explicitSession = !held;
+      this.sessionProbePending = !held && !this.telemetryFreshNow() && !this.recentlyAwake();
     }
     this.emitUpdate();
     if (this.status.override.enabled) void this.tick();
@@ -527,6 +585,8 @@ export class ChargeController extends EventEmitter {
         sessionBundleOpen: this.sessionBundleOpen,
       }),
       sessionProbePending: this.sessionProbePending,
+      suppressWake: this.suppressWake,
+      knownAwake: this.recentlyAwake(),
       quietHours: this.isWithinQuietHours(now),
       budgetUntil: this.budgetUntil,
     });
@@ -592,36 +652,49 @@ export class ChargeController extends EventEmitter {
 
     this.sessionProbePending = false;
 
-    if (plan.shouldWake) {
-      const woke = await this.wakeOnce();
-      if (!woke && Date.now() < this.rateLimitedUntil) {
-        this.haveFreshControlState = false;
-        this.publishBlockStatus();
-        return this.lastPolledVehicle;
-      }
-    }
-
     const polled = await this.pollDirect();
-    if (Date.now() < this.rateLimitedUntil || (this.budgetHoldActive() && !this.sessionBundleOpen && !this.sessionCredit)) {
-      if (Date.now() < this.rateLimitedUntil) {
-        this.haveFreshControlState = false;
-        this.publishBlockStatus();
-        return this.lastPolledVehicle;
-      }
+    if (Date.now() < this.rateLimitedUntil || this.budgetHoldActive()) {
+      this.haveFreshControlState = false;
+      this.suppressWake = true;
+      this.persistHolds();
+      this.publishBlockStatus();
+      return this.lastPolledVehicle;
     }
 
     if (polled) {
       this.haveFreshControlState = true;
       this.consecutiveFailures = 0;
+      this.suppressWake = false;
       this.status.teslaWait = "none";
       this.status.nextTeslaAttemptAt = null;
+      this.persistHolds();
       return polled;
     }
+
+    // The read failed for a non-hold reason (typically asleep). At most one
+    // wake_up, and never when we already know the car is online or the
+    // previous answer was a 403/429.
+    if (!this.suppressWake && !this.recentlyAwake() && this.wakeGapElapsed()) {
+      await this.wakeOnce();
+      if (Date.now() < this.rateLimitedUntil || this.budgetHoldActive()) {
+        this.haveFreshControlState = false;
+        this.suppressWake = true;
+        this.persistHolds();
+        this.publishBlockStatus();
+        return this.lastPolledVehicle;
+      }
+    }
+    this.suppressWake = false;
 
     this.haveFreshControlState = false;
     const followUp = this.recoveryPlan(Date.now(), false);
     this.publishTeslaWait(followUp);
     return this.lastPolledVehicle;
+  }
+
+  private wakeGapElapsed(): boolean {
+    if (this.lastWakeAttemptAt <= 0) return true;
+    return Date.now() - this.lastWakeAttemptAt >= config.tesla.telemetryRecoveryPollMs;
   }
 
   /** One wake_up. The caller already decided it is due. */

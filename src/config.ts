@@ -68,11 +68,15 @@ const schema = z.object({
   // Minimum gap between direct recovery polls while telemetry is stale, so
   // a vehicle that's offline/deep-asleep doesn't get polled every cycle.
   TESLA_TELEMETRY_RECOVERY_POLL_MS: numeric().default("300000"),
-  // How long to stop calling Tesla entirely (reads, commands, wake_up -
-  // everything) after a 403/429 response, since Tesla's own account-level
-  // rate limit doesn't clear by retrying sooner and every retry just adds
-  // to whatever got it disabled in the first place. Do not shorten this.
+  // How long to stop calling Tesla entirely after a non-billing 403
+  // (account block / auth-edge). Do not shorten this. The timestamp is
+  // written to TESLA_HOLDS_PATH so a pm2 restart cannot clear it and
+  // immediately wake_up again. A plain 429 uses the shorter transient
+  // cooldown below; EXCEEDED_LIMIT / 402 use the billing hold instead.
   TESLA_RATE_LIMIT_COOLDOWN_MS: numeric().default("1800000"),
+  // Transient HTTP 429 only. One vehicle_data probe after this, not a wake.
+  // Persisted the same way so a restart does not start a fresh timer.
+  TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS: numeric().default("300000"),
   // Minimum gap between repeated charge_start / charge_stop / set_charging_amps
   // calls. The control loop used to send those every poll while the car's
   // reported state lagged, which is most of the Oct 2026 command bill.
@@ -82,8 +86,9 @@ const schema = z.object({
   // auto: normal telemetry control until Tesla reports a billing cap, then
   // pause paid calls for TESLA_API_BUDGET_COOLDOWN_MS. on: pause immediately
   // (use this for the rest of a month that's already over the $16 Fleet API
-  // discount). off: never enter the billing hold. Turning solar on still
-  // allows one session attempt (see controller).
+  // discount). off: never enter the billing hold (a billing 403 then uses
+  // the rate-limit cooldown so the app still stops calling Tesla). Turning
+  // solar on does not wake or probe while a hold is active.
   TESLA_API_BUDGET_MODE: z.enum(["auto", "on", "off"]).default("auto"),
   // How long `auto` mode stays paused after a billing-cap response (HTTP 402
   // or a billing error body). Longer than the 403/429 cooldown on purpose.
@@ -155,6 +160,7 @@ export const config = {
     telemetryChargingStaleMs: env.TESLA_TELEMETRY_CHARGING_STALE_MS!,
     telemetryRecoveryPollMs: env.TESLA_TELEMETRY_RECOVERY_POLL_MS!,
     rateLimitCooldownMs: env.TESLA_RATE_LIMIT_COOLDOWN_MS!,
+    transientRateLimitCooldownMs: env.TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS!,
     commandMinIntervalMs: env.TESLA_COMMAND_MIN_INTERVAL_MS!,
     apiBudgetMode: env.TESLA_API_BUDGET_MODE,
     apiBudgetCooldownMs: env.TESLA_API_BUDGET_COOLDOWN_MS!,
