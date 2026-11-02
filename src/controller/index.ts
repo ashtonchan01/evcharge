@@ -303,13 +303,16 @@ export class ChargeController extends EventEmitter {
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
     if (enabled) {
-      // Do not wake, and do not spend a paid probe, when a hold is active
-      // or the last snapshot already shows the car online. A probe is one
-      // vehicle_data read — never a leading wake_up.
+      // Do not spend a paid probe during a billing/rate-limit hold, or when
+      // the last snapshot already shows the car online. Otherwise contact
+      // Tesla now: one vehicle_data read, then one wake if that read gets
+      // nothing. Do not leave the previous "next try in 10 min" countdown
+      // on screen for this tap.
       const held = this.paidHoldActive();
       this.sessionCredit = false;
       this.explicitSession = !held;
       this.sessionProbePending = !held && !this.telemetryFreshNow() && !this.recentlyAwake();
+      if (this.sessionProbePending) this.clearRecoveryCountdown();
     } else {
       this.sessionCredit = false;
       this.sessionProbePending = false;
@@ -341,6 +344,7 @@ export class ChargeController extends EventEmitter {
       this.sessionCredit = false;
       this.explicitSession = !held;
       this.sessionProbePending = !held && !this.telemetryFreshNow() && !this.recentlyAwake();
+      if (this.sessionProbePending) this.clearRecoveryCountdown();
     }
     this.emitUpdate();
     if (this.status.override.enabled) void this.tick();
@@ -679,6 +683,22 @@ export class ChargeController extends EventEmitter {
   }
 
   /**
+   * Drop a waking/asleep countdown the moment the user asks for contact.
+   * The tick that follows may put a new countdown up only after that
+   * immediate probe (and its one wake) have finished.
+   */
+  private clearRecoveryCountdown(): void {
+    if (
+      this.status.teslaWait === "waking" ||
+      this.status.teslaWait === "asleep" ||
+      this.status.teslaWait === "none"
+    ) {
+      this.status.teslaWait = "none";
+      this.status.nextTeslaAttemptAt = null;
+    }
+  }
+
+  /**
    * Poll (and maybe wake once) when telemetry has no fresh hint.
    * haveFreshControlState is true only when this call actually got a reading,
    * so later ticks don't keep commanding off the cached snapshot.
@@ -694,6 +714,10 @@ export class ChargeController extends EventEmitter {
       return this.lastPolledVehicle;
     }
 
+    // Remember this before clearing the flag. A user enable polls now and,
+    // if the car does not answer, wakes once even when the last wake was
+    // inside the recovery gap. The next automatic cycle does not.
+    const userInitiated = this.sessionProbePending;
     this.sessionProbePending = false;
 
     const polled = await this.pollDirect();
@@ -715,10 +739,10 @@ export class ChargeController extends EventEmitter {
       return polled;
     }
 
-    // The read failed for a non-hold reason (typically asleep). At most one
-    // wake_up, and never when we already know the car is online or the
-    // previous answer was a 403/429.
-    if (!this.suppressWake && !this.recentlyAwake() && this.wakeGapElapsed()) {
+    // The read failed for a non-hold reason (typically asleep). A user
+    // enable gets that wake immediately. Automatic retries still wait out
+    // the recovery gap, and a 403/429 never wakes.
+    if (!this.suppressWake && !this.recentlyAwake() && (userInitiated || this.wakeGapElapsed())) {
       await this.wakeOnce();
       if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil || this.budgetHoldActive()) {
         this.haveFreshControlState = false;

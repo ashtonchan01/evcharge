@@ -4,11 +4,14 @@
  * Oct 2026 billing (Ashton): the $16 monthly discount was used up, mostly by
  * Commands (6,383 / $9.96), then Data (1,220 / $3.81) and Wakes (52 / $1.62).
  * Streaming telemetry was the cheap path. Nothing in here may poll, wake, or
- * command faster than the configured recovery / command gaps. A single
- * explicit session probe (the user turned solar charging on) may run once
- * inside that gap. A non-billing 403 still uses the full cooldown. Billing
- * EXCEEDED_LIMIT / 402 does not. A session probe polls vehicle_data and
- * does not call wake_up.
+ * command faster than the configured recovery / command gaps, except one
+ * explicit session: the user turned solar charging on (or picked a vehicle).
+ * That session polls vehicle_data immediately, and if the car does not
+ * answer, wakes once — even inside the recovery gap. Later automatic
+ * retries keep the gap. A non-billing 403 still uses the full cooldown.
+ * Billing EXCEEDED_LIMIT / 402 does not. `shouldWake` here is only the
+ * automatic schedule; the enable-time wake is applied in pollForRecovery
+ * so we probe first and wake only if that probe gets nothing.
  */
 
 export type TeslaWait = "none" | "waking" | "asleep" | "rate_limited" | "budget" | "auth" | "quiet_hours";
@@ -78,7 +81,11 @@ export interface RecoveryPlanInput {
   rateLimitedUntil: number;
   authPausedUntil?: number;
   budgetBlocked: boolean;
-  /** User just turned solar on and telemetry has no fresh hint. One vehicle_data poll, no wake. */
+  /**
+   * User just turned solar on, or switched vehicle, and telemetry has no
+   * fresh hint. One immediate vehicle_data poll inside the recovery gap.
+   * The wake that may follow that probe is decided in pollForRecovery.
+   */
   sessionProbePending: boolean;
   /** Set after a hold. The next probe must not call wake_up. */
   suppressWake?: boolean;
@@ -142,9 +149,10 @@ export function planRecovery(input: RecoveryPlanInput): RecoveryPlan {
   const sinceWake =
     input.lastWakeAttemptAt <= 0 ? Number.POSITIVE_INFINITY : input.now - input.lastWakeAttemptAt;
   const pollDue = input.sessionProbePending || sincePoll >= gap;
-  // Never wake just because solar was turned on, just because a hold expired,
-  // or when we already know the car is online. Wake stays a follow-up to a
-  // failed vehicle_data read (see pollForRecovery), at most once per gap.
+  // Automatic wake only: not on the enable itself (pollForRecovery wakes
+  // once after that probe if the car stays silent), not when a hold just
+  // expired, and not when we already know the car is online. At most one
+  // automatic wake per gap, and not on a failure streak.
   const wakeDue =
     pollDue &&
     !input.sessionProbePending &&
