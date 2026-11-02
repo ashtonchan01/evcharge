@@ -76,6 +76,65 @@ test("pSystem is used when pAc is absent, including a nested flow object", () =>
   assert.equal(snap?.batterySoc, 40);
 });
 
+test("blank or zero pConsum while solar is exporting uses the flow balance for home load", () => {
+  // Portal identity: pSystem = pConsum + pGrid − pBat, so a stuck 0 load is 5.783 − 5.02 = 0.763 kW.
+  const blank = parseSemsPlusFlow({
+    data: { pSystem: 5.783, pAc: 5.783, pBat: 0, pGrid: 5.02, pConsum: " ", consumFlag: false },
+  });
+  assert.equal(blank?.pvPowerW, 5783);
+  assert.equal(blank?.loadPowerW, 763);
+  assert.equal(blank?.gridPowerW, 5020);
+
+  const stuckZero = parseSemsPlusFlow({
+    data: { pSystem: 5.783, pAc: 5.783, pBat: 0, pGrid: 5.02, pConsum: 0 },
+  });
+  assert.equal(stuckZero?.loadPowerW, 763);
+});
+
+test("a non-zero pConsum or pLoad is kept, and a fully idle plant stays 0 W", () => {
+  const trusted = parseSemsPlusFlow({
+    data: { pAc: 5.783, pSystem: 5.783, pConsum: 0.4, pLoad: 9, pGrid: 5.02, pBat: 0 },
+  });
+  assert.equal(trusted?.loadPowerW, 400);
+
+  const otherName = parseSemsPlusFlow({
+    data: { pAc: 2, pConsum: 0, pLoad: 1.8, pGrid: 0.2 },
+  });
+  assert.equal(otherName?.loadPowerW, 1800);
+
+  const night = parseSemsPlusFlow({
+    data: { pAc: 0, pSystem: 0, pConsum: 0, pGrid: 0, pBat: 0 },
+  });
+  assert.equal(night?.loadPowerW, 0);
+  assert.equal(night?.pvPowerW, 0);
+});
+
+test("night grid import derives house load, and export that already matches PV does not invent one", () => {
+  const importing = parseSemsPlusFlow({
+    data: { pAc: 0, pSystem: 0, pGrid: -1.351, pBat: 0 },
+  });
+  assert.equal(importing?.pvPowerW, 0);
+  assert.equal(importing?.loadPowerW, 1351);
+  assert.equal(importing?.gridPowerW, -1351);
+
+  // 4.522 kW solar and 4.644 kW export: the balance is ~0, so home stays 0 rather than a made-up baseload.
+  const exporting = parseSemsPlusFlow({
+    data: { pAc: 4.522, pConsum: 0, pGrid: 4.644 },
+  });
+  assert.equal(exporting?.pvPowerW, 4522);
+  assert.equal(exporting?.loadPowerW, 0);
+  assert.equal(exporting?.gridPowerW, 4644);
+});
+
+test("battery discharge at night is part of the load balance", () => {
+  // pSystem 0, pBat 1.1793 discharge, pGrid 0.149 export → load 1.0303 kW.
+  const snap = parseSemsPlusFlow({
+    data: { pSystem: 0, pAc: 1.1793, pBat: 1.1793, pGrid: 0.149, pConsum: " " },
+  });
+  assert.equal(snap?.loadPowerW, 1030);
+  assert.equal(snap?.batteryPowerW, 1179);
+});
+
 test("device uuid is stable across reads of the same file", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "sems-device-"));
   const file = path.join(dir, "device-id");

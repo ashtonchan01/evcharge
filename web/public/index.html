@@ -87,11 +87,12 @@
           <dt>Charge amps</dt><dd id="amps">–</dd>
           <dt>Charge limit</dt><dd id="charge-limit">–</dd>
         </dl>
-        <form id="charge-limit-form" class="buffer-row">
+        <!-- Not a login. autocomplete/one-time-code stops iOS Keychain offering a saved nubonus password. -->
+        <form id="charge-limit-form" class="buffer-row" autocomplete="off">
           <label for="charge-limit-range">Set charge limit</label>
           <div class="buffer-controls">
-            <input id="charge-limit-range" type="range" min="50" max="100" step="5" value="80" />
-            <input id="charge-limit-input" type="number" min="50" max="100" step="1" placeholder="80" />
+            <input id="charge-limit-range" name="ev-charge-limit-slider" type="range" min="50" max="100" step="5" value="80" autocomplete="off" />
+            <input id="charge-limit-input" name="ev-charge-limit-percent" type="text" inputmode="numeric" pattern="[0-9]*" minlength="2" maxlength="3" placeholder="80" autocomplete="one-time-code" autocorrect="off" autocapitalize="off" spellcheck="false" />
             <span class="buffer-unit">%</span>
             <button type="submit">Set</button>
           </div>
@@ -122,11 +123,12 @@
         <span id="enabled-label">On</span>
       </div>
 
-      <form id="buffer-form" class="buffer-row">
+      <!-- Not a login. Same Keychain guard as the charge-limit fields. -->
+      <form id="buffer-form" class="buffer-row" autocomplete="off">
         <label for="buffer-range">Grid import buffer</label>
         <div class="buffer-controls">
-          <input id="buffer-range" type="range" min="0" max="3000" step="50" value="0" />
-          <input id="buffer-input" type="number" min="0" step="50" placeholder="0" />
+          <input id="buffer-range" name="grid-import-buffer-slider" type="range" min="0" max="3000" step="50" value="0" autocomplete="off" />
+          <input id="buffer-input" name="grid-import-buffer-watts" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" placeholder="0" autocomplete="one-time-code" autocorrect="off" autocapitalize="off" spellcheck="false" />
           <span class="buffer-unit">W</span>
           <button type="submit">Set</button>
         </div>

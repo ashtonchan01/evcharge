@@ -131,21 +131,74 @@ function clip(value: unknown): string {
  * SEMS+ `stations/flow` power fields are kW. evcharge stores watts.
  * Positive grid watts are export, matching a live sample where
  * pAc 0.57 − pConsum 0.297 = pGrid 0.273.
- * An explicit numeric 0 is a real night/standby reading, not a missing field.
+ * An explicit numeric 0 on an idle plant is a real standby reading.
+ * A blank `pConsum` (`" "`) is missing, not a measured 0 W house.
  */
 export function kwToWatts(kw: number): number {
   return Math.round(kw * 1000);
 }
 
+/** One field. Blank strings and dashes are missing, not zero. `Number(" ")` is 0, which hid home load. */
+function readKw(record: Record<string, unknown>, key: string): number | null {
+  if (!Object.prototype.hasOwnProperty.call(record, key)) return null;
+  const value = record[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "-" || trimmed === "--") return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function firstFinite(record: Record<string, unknown>, keys: string[]): number | null {
   for (const key of keys) {
-    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
-    const value = record[key];
-    if (value === null || value === undefined || value === "") continue;
-    const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-    if (Number.isFinite(parsed)) return parsed;
+    const parsed = readKw(record, key);
+    if (parsed !== null) return parsed;
   }
   return null;
+}
+
+const LOAD_KEYS = ["pConsum", "pLoad", "pload", "pConsumption", "consumption"] as const;
+
+/**
+ * Home load in kW.
+ * A non-zero meter field wins (`pConsum`, then the other load names).
+ * An exact 0 or a blank field while power is flowing uses the SEMS+ balance
+ * `load = pSystem − pGrid + pBat` (pBat > 0 is discharge, pGrid > 0 is export).
+ * That identity is what the portal's flow samples satisfy. An idle plant
+ * (pv, grid, and battery all ~0) stays 0 — we do not invent a night baseload.
+ * When export already accounts for generation, the balance is ~0 and stays 0.
+ */
+export function resolveHomeLoadKw(input: {
+  reportedLoadKw: number | null;
+  /** pSystem when the payload has it, otherwise the displayed PV (pAc). */
+  pvBalanceKw: number;
+  gridKw: number;
+  batteryKw: number;
+}): number {
+  const idle =
+    Math.abs(input.pvBalanceKw) < 0.02 &&
+    Math.abs(input.gridKw) < 0.02 &&
+    Math.abs(input.batteryKw) < 0.02;
+  if (idle) return input.reportedLoadKw ?? 0;
+  if (input.reportedLoadKw !== null && Math.abs(input.reportedLoadKw) >= 0.02) return input.reportedLoadKw;
+
+  const derived = input.pvBalanceKw - input.gridKw + input.batteryKw;
+  if (derived >= 0.02) return derived;
+  if (derived > -0.02) return 0;
+  return input.reportedLoadKw ?? 0;
+}
+
+function reportedLoadKw(record: Record<string, unknown>): number | null {
+  let explicitZero = false;
+  for (const key of LOAD_KEYS) {
+    const parsed = readKw(record, key);
+    if (parsed === null) continue;
+    if (Math.abs(parsed) >= 0.0005) return parsed;
+    explicitZero = true;
+  }
+  return explicitZero ? 0 : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -162,7 +215,7 @@ function flatten(value: unknown, out: Record<string, unknown>): void {
   }
 }
 
-const POWER_KEYS = ["pAc", "pSystem", "pConsum", "pGrid"];
+const POWER_KEYS = ["pAc", "pSystem", "pConsum", "pLoad", "pGrid"];
 
 function hasPowerKey(record: Record<string, unknown>): boolean {
   return POWER_KEYS.some((key) => Object.prototype.hasOwnProperty.call(record, key));
@@ -185,22 +238,28 @@ export function findSemsPlusPowerRecord(payload: unknown): Record<string, unknow
 
 /**
  * Map a SEMS+ flow payload onto the controller snapshot.
- * Returns null when pv, load, or grid is absent — that is not a 0W plant.
+ * Returns null when pv or grid is absent — that is not a 0W plant.
  *
- * - pAc, else pSystem (kW) → pvPowerW
- * - pConsum (kW) → loadPowerW
+ * - pAc, else pSystem (kW) → pvPowerW. pAc is what the verified AU sample matched.
+ * - Home load: non-zero pConsum / pLoad, else the balance on pSystem (see resolveHomeLoadKw).
  * - pGrid (kW, positive = export) → gridPowerW
- * - pBat (kW) → batteryPowerW when present
+ * - pBat (kW, positive = discharge) → batteryPowerW when present
  * - soc → batterySoc when present
  */
 export function parseSemsPlusFlow(payload: unknown, timestamp = new Date()): SolarSnapshot | null {
   const record = findSemsPlusPowerRecord(payload);
   if (!record) return null;
   const pvKw = firstFinite(record, ["pAc", "pSystem"]);
-  const loadKw = firstFinite(record, ["pConsum"]);
   const gridKw = firstFinite(record, ["pGrid"]);
-  if (pvKw === null || loadKw === null || gridKw === null) return null;
+  if (pvKw === null || gridKw === null) return null;
+  const systemKw = readKw(record, "pSystem");
   const batteryKw = firstFinite(record, ["pBat", "pBattery"]);
+  const loadKw = resolveHomeLoadKw({
+    reportedLoadKw: reportedLoadKw(record),
+    pvBalanceKw: systemKw !== null ? systemKw : pvKw,
+    gridKw,
+    batteryKw: batteryKw ?? 0,
+  });
   const soc = firstFinite(record, ["soc", "batterySoc"]);
   return {
     timestamp,

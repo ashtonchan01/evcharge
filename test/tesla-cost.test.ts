@@ -503,3 +503,65 @@ describe("GET /api/vehicles cache", () => {
     }
   });
 });
+
+describe("enable solar inside the recovery gap", () => {
+  it("clears the waking countdown, polls, and wakes once", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    const polls: number[] = [];
+    const wakes: number[] = [];
+    const goodwe = {
+      async getSnapshot() {
+        return {
+          timestamp: new Date(),
+          pvPowerW: 2000,
+          loadPowerW: 500,
+          gridPowerW: 1500,
+          batteryPowerW: 0,
+          batterySoc: null,
+        };
+      },
+    };
+    const tesla = {
+      getVehicleTag: () => "5YJ3TESTVIN000001",
+      setVehicleTag() {},
+      async getChargeState() {
+        polls.push(Date.now());
+        throw new Error("asleep");
+      },
+      async wakeUp() {
+        wakes.push(Date.now());
+      },
+    };
+    const controller = new ChargeController(goodwe as never, tesla as never, null);
+    const internal = controller as unknown as {
+      tick(): Promise<void>;
+      tickInFlight: boolean;
+      lastFallbackAttemptAt: number;
+      lastWakeAttemptAt: number;
+      consecutiveFailures: number;
+    };
+    const now = Date.now();
+    internal.lastFallbackAttemptAt = now;
+    internal.lastWakeAttemptAt = now;
+    internal.consecutiveFailures = 2;
+    controller.getStatus().teslaWait = "waking";
+    controller.getStatus().nextTeslaAttemptAt = new Date(now + 9 * 60 * 1000);
+
+    controller.setEnabled(true, "test");
+    const next = controller.getStatus().nextTeslaAttemptAt;
+    const stillWaitingOutTheGap = next !== null && next.getTime() - Date.now() > 60_000;
+    assert.equal(stillWaitingOutTheGap, false);
+    assert.notEqual(controller.getStatus().teslaWait, "waking");
+
+    for (let i = 0; i < 50 && (internal.tickInFlight || wakes.length === 0); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(polls.length, 1);
+    assert.equal(wakes.length, 1);
+
+    await internal.tick();
+    assert.equal(wakes.length, 1);
+    assert.equal(polls.length, 1);
+  });
+});
