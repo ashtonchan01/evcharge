@@ -1,6 +1,7 @@
 import fetch from "cross-fetch";
 import { config } from "../config.js";
 import { logger } from "../util/logger.js";
+import { resolveSemsPlusWebOrigin, SemsPlusClient } from "./semsPlus.js";
 
 const log = logger.child({ module: "goodwe" });
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -65,20 +66,39 @@ interface SemsTokenBundle {
  * refresh region-specific base URLs. We cache the token bundle and refresh
  * it on 401s.
  */
+export interface GoodweClientOptions {
+  /** SEMS+ web origin. Classic portal base URLs stay on the AU SEMS+ host. */
+  semsPlusWebOrigin?: string;
+  /** Injected device uuid. Production persists one under `.data/device-id`. */
+  deviceId?: string;
+  deviceIdPath?: string;
+}
+
 export class GoodweSemsClient {
   private tokenBundle: SemsTokenBundle | null = null;
   private baseUrl: string;
   private readonly fetchImpl: SemsFetch;
+  private readonly semsPlus: SemsPlusClient;
 
   constructor(
     private readonly account: string,
     private readonly password: string,
     private readonly stationId: string,
     baseUrl: string,
-    fetchImpl: SemsFetch = fetch
+    fetchImpl: SemsFetch = fetch,
+    options: GoodweClientOptions = {}
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.fetchImpl = fetchImpl;
+    this.semsPlus = new SemsPlusClient(
+      account,
+      password,
+      stationId,
+      resolveSemsPlusWebOrigin(this.baseUrl, options.semsPlusWebOrigin),
+      fetchImpl,
+      options.deviceId,
+      options.deviceIdPath
+    );
   }
 
   private async login(): Promise<SemsTokenBundle> {
@@ -186,24 +206,53 @@ export class GoodweSemsClient {
   }
 
   /**
-   * Fetch the latest real-time power figures for the configured power
-   * station.
+   * Live PV / load / grid for the station.
    *
-   * `GetMonitorDetailByPowerstationId` used to embed `data.powerflow`. It
-   * now often returns HTTP 200 / code 0 with an empty `data` object, which
-   * made every reading look like 0W. `GetPowerflow` still returns the live
-   * block (`pv` / `load` / `grid` as `376W` or the older `2690(W)`). Use
-   * that first, and fall back to monitor detail when it still has a
-   * powerflow (or when GetPowerflow itself fails).
+   * SEMS+ `stations/flow` is the source the SEMS+ app shows (kW floats).
+   * Classic GetPowerflow often answers HTTP 200 with literal `"0W"` while
+   * the plant is generating, so it is only a fallback. An explicit numeric
+   * 0 from SEMS+ is a real standby reading. If SEMS+ has no power fields
+   * and classic GetPowerflow / monitor detail are empty too, this throws
+   * so the controller can set lastError instead of painting a healthy 0W.
    */
   async getSnapshot(): Promise<SolarSnapshot> {
+    const plus = await this.semsPlus.readSnapshot();
+    if (plus.snapshot) {
+      log.debug(
+        {
+          pvPowerW: plus.snapshot.pvPowerW,
+          loadPowerW: plus.snapshot.loadPowerW,
+          gridPowerW: plus.snapshot.gridPowerW,
+        },
+        "Using SEMS+ stations/flow for the station snapshot"
+      );
+      return plus.snapshot;
+    }
+
+    log.warn({ err: plus.error }, "SEMS+ live flow unavailable; falling back to classic SEMS");
+    try {
+      const classic = await this.readClassicSnapshot();
+      if (classic) return classic;
+      throw new Error("classic SEMS had no usable powerflow");
+    } catch (err) {
+      const classicMsg = err instanceof Error ? err.message : String(err);
+      throw new Error(`SEMS solar unavailable: ${plus.error ?? "SEMS+ stations/flow failed"}; ${classicMsg}`);
+    }
+  }
+
+  /**
+   * Classic portal. GetPowerflow first, then monitor detail. A payload that
+   * actually contains pv/load/grid — including explicit `"0W"` — is usable.
+   * An empty `data` object is not.
+   */
+  private async readClassicSnapshot(): Promise<SolarSnapshot | null> {
     const flowBody = await this.tryPost<{ code?: number | string; msg?: string; data?: unknown }>(
       "/v2/PowerStation/GetPowerflow",
       { powerStationId: this.stationId }
     );
     const fromFlow = flowBody ? extractPowerflow(flowBody.data) : null;
     if (fromFlow) {
-      log.debug({ powerflow: fromFlow.powerflow }, "Using SEMS GetPowerflow for the station snapshot");
+      log.debug({ powerflow: fromFlow.powerflow }, "Using classic SEMS GetPowerflow for the station snapshot");
       return snapshotFromPowerflow(fromFlow.powerflow, fromFlow.info);
     }
 
@@ -214,7 +263,8 @@ export class GoodweSemsClient {
     );
     log.debug({ body: detailBody }, "Raw SEMS monitor-detail response");
     const fromDetail = extractPowerflow(detailBody.data);
-    return snapshotFromPowerflow(fromDetail?.powerflow ?? {}, fromDetail?.info ?? {});
+    if (!fromDetail) return null;
+    return snapshotFromPowerflow(fromDetail.powerflow, fromDetail.info);
   }
 
   /**
@@ -344,6 +394,8 @@ export function createGoodweClient(): GoodweSemsClient {
     config.goodwe.account,
     config.goodwe.password,
     config.goodwe.stationId,
-    config.goodwe.baseUrl
+    config.goodwe.baseUrl,
+    fetch,
+    { semsPlusWebOrigin: config.goodwe.semsPlusWebOrigin }
   );
 }
