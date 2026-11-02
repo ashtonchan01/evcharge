@@ -23,7 +23,10 @@ const schema = z.object({
   GOODWE_SEMS_ACCOUNT: z.string().min(1),
   GOODWE_SEMS_PASSWORD: z.string().min(1),
   GOODWE_STATION_ID: z.string().min(1),
+  // Classic portal. Live watts come from SEMS+; this URL is the fallback.
   GOODWE_SEMS_BASE_URL: z.string().default("https://www.semsportal.com/api"),
+  // Optional. Unset (or a classic portal URL above) uses the AU SEMS+ web origin.
+  GOODWE_SEMS_PLUS_WEB_ORIGIN: z.string().optional(),
 
   TESLA_FLEET_API_BASE_URL: z.string().default("https://fleet-api.prd.na.vehicle-command.psf.tesla.com"),
   // Fleet token endpoint. Do not point this at auth.tesla.com — that host
@@ -150,6 +153,7 @@ export const config = {
     password: env.GOODWE_SEMS_PASSWORD,
     stationId: env.GOODWE_STATION_ID,
     baseUrl: env.GOODWE_SEMS_BASE_URL,
+    semsPlusWebOrigin: env.GOODWE_SEMS_PLUS_WEB_ORIGIN || undefined,
   },
 
   tesla: {
