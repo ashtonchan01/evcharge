@@ -104,8 +104,9 @@ function decisionView(status) {
   const chargingNow = vehicleIsCharging(status.vehicle);
   const onlineNow = vehicleIsOnline(status.vehicle);
   // A live charge snapshot wins over a recovery-gap "waking" countdown.
+  // Leave note empty so the thin bar can show "Next check in Ns".
   if ((status.teslaWait === "waking" || status.teslaWait === "asleep" || status.decision === "unavailable") && chargingNow) {
-    return { cls: "charging", label: "Charging", note: status.statusNote || "" };
+    return { cls: "charging", label: "Charging", note: "" };
   }
   if ((status.teslaWait === "waking" || status.teslaWait === "asleep") && onlineNow) {
     return { cls: "online", label: "Online", note: "" };
@@ -131,11 +132,12 @@ function decisionView(status) {
     waiting_for_stability: "Waiting for stability",
     unavailable: "Unavailable",
   };
-  const note = status.statusNote || "";
+  // Do not put controller statusNote into this bar — hold/wake prose was
+  // hiding the next-check countdown on the phone during normal Charging.
   return {
     cls: status.decision || "unavailable",
     label: labels[status.decision] || String(status.decision || "Unavailable").replace(/_/g, " "),
-    note,
+    note: "",
   };
 }
 
@@ -164,20 +166,24 @@ function tickCountdown() {
     decisionEl.className = `decision-pill ${view.cls}`;
   }
 
-  // Tesla wake / hold notes win. Otherwise show the thin next-poll countdown
-  // so the status bar is never an empty Online pill.
+  // Only mid-wake / rate-limit / budget / quiet-hours notes use decision-note.
+  // Otherwise always fill the thin bar with the next-check countdown so the
+  // phone never sees an empty Online/Charging pill.
   const note = view.note || "";
   setText("decision-note", note);
 
   const pollEl = $("next-poll");
   if (pollEl) {
     if (note) {
-      pollEl.hidden = true;
       pollEl.textContent = "";
+      pollEl.hidden = true;
     } else {
       const poll = nextPollLabel();
-      pollEl.hidden = !poll;
       pollEl.textContent = poll;
+      // Prefer removeAttribute: some WebKit builds keep [hidden] styling
+      // sticky if only the .hidden property is toggled after a prior hide.
+      if (poll) pollEl.removeAttribute("hidden");
+      else pollEl.hidden = true;
     }
   }
 }
@@ -214,7 +220,7 @@ function render(status) {
 
   $("enabled-toggle").checked = status.override.enabled;
   setText("enabled-label", status.override.enabled ? "On" : "Off");
-  setText("solar-hint", status.override.enabled ? "Follows the sun." : "Stops the car.");
+  setText("solar-hint", status.override.enabled ? "" : "Stops the car.");
 
   ensureVehicleOption(status.vehicleTag);
 
@@ -409,7 +415,7 @@ $("enabled-toggle").addEventListener("change", async (e) => {
   }
 
   render(await res.json());
-  flash("override-message", enabled ? "On. Follows the sun." : "Off. Car stays stopped.");
+  flash("override-message", enabled ? "On." : "Off. Car stays stopped.");
 });
 
 function urlBase64ToUint8Array(base64String) {
