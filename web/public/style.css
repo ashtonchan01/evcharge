@@ -328,6 +328,18 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
   line-height: 1.35;
 }
 
+.force-off-note {
+  margin: -8px 0 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+button[aria-pressed="true"] {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
 /* battery gauge */
 
 .battery-gauge {

@@ -14,6 +14,7 @@ import {
   RecoveryPlan,
   TeslaWait,
 } from "./teslaRecovery.js";
+import { loadForceChargeOff, saveForceChargeOff } from "./chargeSettings.js";
 import { loadTeslaHolds, saveTeslaHolds } from "./teslaHolds.js";
 
 const log = logger.child({ module: "controller" });
@@ -53,6 +54,11 @@ export interface ControllerStatus {
   apiBudgetActive: boolean;
   /** Short non-error note, e.g. a command that was skipped because it repeated. */
   statusNote: string | null;
+  /**
+   * User asked to stop the car and keep it stopped, even when solar surplus
+   * would normally charge. Turning solar charging on clears this.
+   */
+  forceChargeOff: boolean;
 }
 
 /**
@@ -80,6 +86,7 @@ export class ChargeController extends EventEmitter {
     teslaWait: config.tesla.apiBudgetMode === "on" ? "budget" : "none",
     apiBudgetActive: config.tesla.apiBudgetMode === "on",
     statusNote: null,
+    forceChargeOff: false,
   };
 
   private timer: NodeJS.Timeout | null = null;
@@ -117,6 +124,8 @@ export class ChargeController extends EventEmitter {
   private lastStopCommandAt = 0;
   private lastAmpCommandAt = 0;
   private lastCommandedAmps: number | null = null;
+  /** Explicit "stop the car and keep it stopped". Cleared by turning solar on. */
+  private forceChargeOff = false;
   // Set on a 403/429 from Tesla - a hard signal to stop calling Tesla
   // entirely (reads, commands, wake_up) until this time, rather than
   // retrying every cycle into an account-level block that retrying won't
@@ -141,6 +150,8 @@ export class ChargeController extends EventEmitter {
     this.status.vehicleTag = tesla.getVehicleTag();
     this.status.telemetryEnabled = telemetry !== null;
     this.restoreHolds();
+    this.forceChargeOff = loadForceChargeOff();
+    this.status.forceChargeOff = this.forceChargeOff;
   }
 
   private restoreHolds(): void {
@@ -302,6 +313,13 @@ export class ChargeController extends EventEmitter {
     log.info({ enabled, setBy }, "Enabled state changed");
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
+    if (enabled && this.forceChargeOff) {
+      // Solar on means follow the sun again. Force-off is the pause.
+      this.forceChargeOff = false;
+      this.status.forceChargeOff = false;
+      saveForceChargeOff(false);
+      log.info({ setBy }, "Solar on cleared force-off");
+    }
     if (enabled) {
       // Do not spend a paid probe during a billing/rate-limit hold, or when
       // the last snapshot already shows the car online. Otherwise contact
@@ -319,6 +337,25 @@ export class ChargeController extends EventEmitter {
     }
     this.emitUpdate();
     if (enabled) void this.tick();
+  }
+
+  /**
+   * Stop the car and refuse to start it again until this is cleared or
+   * solar charging is turned on. Solar off alone does not stop a session
+   * that is already running; this control does.
+   */
+  setForceChargeOff(on: boolean, setBy: string): void {
+    this.forceChargeOff = on;
+    this.status.forceChargeOff = on;
+    saveForceChargeOff(on);
+    log.info({ on, setBy }, "Force-off charging changed");
+    this.aboveStartThresholdCount = 0;
+    this.belowStopThresholdCount = 0;
+    this.status.decision = on ? "idle" : this.status.decision;
+    this.status.targetAmps = on ? null : this.status.targetAmps;
+    if (on) this.explicitSession = true;
+    this.emitUpdate();
+    void this.tick();
   }
 
   setGridImportBufferW(bufferW: number, setBy: string): void {
@@ -877,8 +914,17 @@ export class ChargeController extends EventEmitter {
     }
   }
 
+  private ampsAvailable(surplusW: number, vehicle: VehicleChargeState): number {
+    const evDrawW = vehicle.chargerVoltage * vehicle.chargerActualCurrent;
+    return wattsToAmps(surplusW + evDrawW);
+  }
+
   private async decide(surplusW: number, vehicle: VehicleChargeState | null, solarStale: boolean): Promise<void> {
     this.status.statusNote = null;
+    if (this.forceChargeOff) {
+      await this.holdChargeOff(vehicle ?? this.status.vehicle);
+      return;
+    }
     if (this.isWithinQuietHours(Date.now())) {
       // Mirrors resolveVehicleState's blackout - never issue a command
       // (stop/start/set-amps) during quiet hours either, off cached state.
@@ -925,6 +971,12 @@ export class ChargeController extends EventEmitter {
     }
 
     if (!vehicle) {
+      // No live car reading. Do not start or raise amps off a stale
+      // snapshot — that billed thousands of commands. Do stop if the last
+      // reading was Charging and surplus cannot hold the minimum rate, so
+      // a phone that still shows the old 12 A does not leave the car there
+      // while solar is under the threshold.
+      if (await this.stopStaleChargeIfUnsustainable(surplusW)) return;
       this.status.decision = "unavailable";
       return;
     }
@@ -1002,7 +1054,7 @@ export class ChargeController extends EventEmitter {
     // surplus and the loop would never ramp up.
     const evDrawW = vehicle.chargerVoltage * vehicle.chargerActualCurrent;
     const targetSurplusW = surplusW + evDrawW;
-    const ampsAvailable = wattsToAmps(targetSurplusW);
+    const ampsAvailable = this.ampsAvailable(surplusW, vehicle);
 
     // Ramp amps down as the available surplus shrinks; only stop outright
     // once even the minimum charge rate isn't sustainable for a couple of
@@ -1045,6 +1097,68 @@ export class ChargeController extends EventEmitter {
       return;
     }
     if (ampResult === "held") this.status.statusNote = this.holdNote("Charge rate already sent", this.lastAmpCommandAt);
+  }
+
+  /**
+   * Force-off: stop a charging car and never start one, surplus or not.
+   * Quiet hours and the solar-off hands-off path do not apply here — the
+   * user asked for the car to stop. Rate-limit and billing holds still do.
+   */
+  private async holdChargeOff(known: VehicleChargeState | null): Promise<void> {
+    this.status.decision = "idle";
+    this.status.targetAmps = null;
+    this.aboveStartThresholdCount = 0;
+    const charging = known?.chargingState === "Charging" || known?.chargingState === "Starting";
+    if (!charging) {
+      this.status.statusNote = "Force off — car stays stopped";
+      return;
+    }
+    const stopped = await this.sendStop();
+    if (stopped === "blocked") {
+      this.publishBlockStatus();
+      return;
+    }
+    if (stopped === "held") this.status.statusNote = this.holdNote("Stop already sent", this.lastStopCommandAt);
+    else if (stopped === "sent") this.status.statusNote = "Force off — charging stopped";
+    else this.status.statusNote = "Force off — stop did not reach the car";
+  }
+
+  /**
+   * Last known state says the car is charging, and this surplus cannot
+   * support the minimum amps. Count toward the same stop threshold the
+   * live path uses, then send one stop. A stale Stopped car is ignored.
+   */
+  private async stopStaleChargeIfUnsustainable(surplusW: number): Promise<boolean> {
+    if (!this.status.override.enabled) return false;
+    const last = this.status.vehicle;
+    if (!last || (last.chargingState !== "Charging" && last.chargingState !== "Starting")) return false;
+    if (this.ampsAvailable(surplusW, last) >= config.minChargeAmps) {
+      this.belowStopThresholdCount = 0;
+      this.status.decision = "charging";
+      this.status.statusNote = "Holding the last rate until the car answers";
+      return true;
+    }
+    this.belowStopThresholdCount += 1;
+    this.status.decision = "charging";
+    if (this.belowStopThresholdCount < config.stableCyclesToStop) {
+      this.status.statusNote = "Solar under minimum — stop if this holds";
+      return true;
+    }
+    const stopped = await this.sendStop();
+    if (stopped === "blocked") {
+      this.publishBlockStatus();
+      return true;
+    }
+    if (stopped === "sent" || stopped === "held") {
+      this.status.decision = "idle";
+      this.status.targetAmps = null;
+      this.aboveStartThresholdCount = 0;
+      this.status.statusNote =
+        stopped === "held"
+          ? this.holdNote("Stop already sent", this.lastStopCommandAt)
+          : "Solar under minimum — charging stopped";
+    }
+    return true;
   }
 
   private explicitSession = false;
