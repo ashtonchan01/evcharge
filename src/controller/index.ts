@@ -1129,7 +1129,8 @@ export class ChargeController extends EventEmitter {
     if (this.ampsAvailable(surplusW, last) >= config.minChargeAmps) {
       this.belowStopThresholdCount = 0;
       this.status.decision = "charging";
-      this.status.statusNote = "Holding the last rate until the car answers";
+      // Keep the bar free for the next-check countdown; do not narrate the hold.
+      this.status.statusNote = null;
       return true;
     }
     this.belowStopThresholdCount += 1;

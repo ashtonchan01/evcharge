@@ -305,9 +305,16 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 }
 
 .status-bar-note:empty,
-.status-bar-poll:empty,
-.status-bar-poll[hidden] {
+.status-bar-poll:empty {
   display: none;
+}
+
+.status-bar-poll[hidden] {
+  display: none !important;
+}
+
+.status-bar-poll:not([hidden]):not(:empty) {
+  display: block;
 }
 
 .panel {
@@ -392,6 +399,10 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
   margin-left: auto;
   color: var(--muted);
   font-size: 0.75rem;
+}
+
+.solar-hint:empty {
+  display: none;
 }
 
 .decision-pill {
