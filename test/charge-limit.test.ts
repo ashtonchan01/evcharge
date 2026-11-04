@@ -14,6 +14,8 @@ process.env.TESLA_VEHICLE_TAG ??= "5YJ3TESTVIN000001";
 process.env.QUIET_HOURS_START ??= "";
 process.env.QUIET_HOURS_END ??= "";
 process.env.TESLA_HOLDS_PATH ??= `/tmp/evcharge-holds-charge-limit-${process.pid}.json`;
+process.env.CHARGE_FORCE_OFF_PATH ??= `/tmp/evcharge-force-charge-limit-${process.pid}.json`;
+process.env.ACTIVE_VEHICLE_PATH ??= `/tmp/evcharge-vehicle-charge-limit-${process.pid}.json`;
 
 describe("parseChargeLimitPercent", () => {
   it("accepts every integer from 50 through 100, including 90 and 100", () => {
@@ -80,9 +82,13 @@ describe("POST /api/charge-limit", () => {
 
     const calls: number[] = [];
     let rejectWith: string | null = null;
+    const vin = "5YJ3TESTVIN000001";
+    let tag = "";
     const tesla = {
-      getVehicleTag: () => "5YJ3TESTVIN000001",
-      setVehicleTag: () => {},
+      getVehicleTag: () => tag,
+      setVehicleTag(next: string) {
+        tag = next;
+      },
       setChargeLimit: async (percent: number) => {
         calls.push(percent);
         if (rejectWith) throw new Error(rejectWith);
@@ -94,7 +100,6 @@ describe("POST /api/charge-limit", () => {
 
     const telemetry = new TelemetryIngest();
     const ingest = telemetry as unknown as { handleLine(line: string): void };
-    const vin = "5YJ3TESTVIN000001";
     ingest.handleLine(
       JSON.stringify({
         vin,
@@ -104,6 +109,7 @@ describe("POST /api/charge-limit", () => {
     );
 
     const controller = new ChargeController({} as never, tesla as never, telemetry);
+    controller.setVehicleTag(vin, "test");
     const vehicle = {
       chargingState: "Charging",
       chargeAmps: 12,

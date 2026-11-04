@@ -165,6 +165,10 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
     }
 
     const held = controller.getStatus();
+    if (!held.vehicleTag) {
+      res.status(400).json({ error: "Select a vehicle before setting the charge limit" });
+      return;
+    }
     const rateLimited = held.rateLimitedUntil !== null && new Date(held.rateLimitedUntil).getTime() > Date.now();
     if (rateLimited || held.teslaWait === "auth" || held.apiBudgetActive) {
       res.status(429).json({

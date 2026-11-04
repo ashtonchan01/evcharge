@@ -371,6 +371,13 @@ controls one car at a time, not both simultaneously. Selecting a vehicle
 calls `POST /api/vehicle` with `{ "tag": "<VIN>" }`, and resets the
 stability counters so the newly selected car is evaluated fresh.
 
+That selection is written to `.active-vehicle.json` (override path with
+`ACTIVE_VEHICLE_PATH`) the same way the on/off switch is persisted. A
+`pm2 restart` or deploy keeps the last VIN; it does **not** fall back to
+`TESLA_VEHICLE_TAG`, Model 3, or the first car in the Tesla list. If
+nothing has been saved yet, the active vehicle stays unset until someone
+picks one in the UI.
+
 ## Charge limit
 
 The Vehicle card has a slider/input to set the car's own charge-limit

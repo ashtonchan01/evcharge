@@ -43,7 +43,11 @@ const schema = z.object({
   // process lifetime, and the next restart falls back to the stale .env
   // value and fails outright.
   TESLA_REFRESH_TOKEN_PATH: z.string().optional(),
-  TESLA_VEHICLE_TAG: z.string().min(1),
+  // Optional bootstrap only. The dashboard selection is persisted to
+  // .active-vehicle.json and wins on restart. Do not treat this as the
+  // live car — an empty / unset value leaves selection unset until the UI
+  // picks one (never auto-select Model 3 or the first listed vehicle).
+  TESLA_VEHICLE_TAG: z.string().optional().default(""),
   // Optional: local tesla-http-proxy URL for vehicles that require Tesla's
   // signed Vehicle Command Protocol (anything except pre-2021 Model S/X).
   // When set, command calls (start/stop charging, set amps) route through
@@ -163,7 +167,7 @@ export const config = {
     clientSecret: env.TESLA_CLIENT_SECRET,
     refreshToken: env.TESLA_REFRESH_TOKEN,
     refreshTokenPath: env.TESLA_REFRESH_TOKEN_PATH || undefined,
-    vehicleTag: env.TESLA_VEHICLE_TAG,
+    vehicleTag: (env.TESLA_VEHICLE_TAG || "").trim(),
     commandProxyUrl: env.TESLA_COMMAND_PROXY_URL || undefined,
     telemetryLogPath: env.TESLA_TELEMETRY_LOG_PATH || undefined,
     telemetryErrorLogPath: env.TESLA_TELEMETRY_ERROR_LOG_PATH || undefined,

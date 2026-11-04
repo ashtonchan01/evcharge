@@ -18,6 +18,7 @@ function useTempSettings(): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "evcharge-force-"));
   process.env.TESLA_HOLDS_PATH = path.join(dir, "holds.json");
   process.env.CHARGE_FORCE_OFF_PATH = path.join(dir, "force.json");
+  process.env.ACTIVE_VEHICLE_PATH = path.join(dir, "vehicle.json");
 }
 
 function chargingAt(amps: number) {
