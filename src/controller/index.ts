@@ -14,7 +14,7 @@ import {
   RecoveryPlan,
   TeslaWait,
 } from "./teslaRecovery.js";
-import { loadSolarEnabled, saveSolarEnabled } from "./chargeSettings.js";
+import { loadActiveVehicleTag, loadSolarEnabled, saveActiveVehicleTag, saveSolarEnabled } from "./chargeSettings.js";
 import { loadTeslaHolds, saveTeslaHolds } from "./teslaHolds.js";
 
 const log = logger.child({ module: "controller" });
@@ -139,7 +139,18 @@ export class ChargeController extends EventEmitter {
     private readonly telemetry: TelemetryIngest | null = null
   ) {
     super();
-    this.status.vehicleTag = tesla.getVehicleTag();
+    // Only the last dashboard selection (persisted) is the active car.
+    // Ignore TESLA_VEHICLE_TAG / whatever the Tesla client was constructed
+    // with — restart must not flip back to Model 3 or the first listed VIN.
+    const savedTag = loadActiveVehicleTag();
+    if (savedTag) {
+      this.tesla.setVehicleTag(savedTag);
+      this.status.vehicleTag = savedTag;
+    } else {
+      this.tesla.setVehicleTag("");
+      this.status.vehicleTag = "";
+      log.info("No persisted active vehicle — waiting for a dashboard selection");
+    }
     this.status.telemetryEnabled = telemetry !== null;
     this.restoreHolds();
     const savedEnabled = loadSolarEnabled();
@@ -156,7 +167,9 @@ export class ChargeController extends EventEmitter {
     if (saved.authPausedUntil > now) this.authPausedUntil = saved.authPausedUntil;
     this.suppressWake =
       saved.suppressWake || saved.rateLimitedUntil > now || saved.budgetUntil > now || saved.authPausedUntil > now;
-    if (saved.vehicle) {
+    // Only restore a charge snapshot when a VIN is already selected —
+    // never invent a car from a leftover hold after an unset selection.
+    if (saved.vehicle && this.status.vehicleTag) {
       this.lastPolledVehicle = saved.vehicle;
       this.status.vehicle = saved.vehicle;
     }
@@ -340,9 +353,11 @@ export class ChargeController extends EventEmitter {
   }
 
   setVehicleTag(tag: string, setBy: string): void {
-    log.info({ tag, setBy }, "Switching active vehicle");
-    this.tesla.setVehicleTag(tag);
-    this.status.vehicleTag = tag;
+    const trimmed = tag.trim();
+    log.info({ tag: trimmed, setBy }, "Switching active vehicle");
+    this.tesla.setVehicleTag(trimmed);
+    this.status.vehicleTag = trimmed;
+    saveActiveVehicleTag(trimmed);
     this.status.vehicle = null;
     this.status.decision = "unavailable";
     this.aboveStartThresholdCount = 0;
@@ -351,6 +366,9 @@ export class ChargeController extends EventEmitter {
     this.haveFreshControlState = false;
     this.consecutiveFailures = 0;
     this.lastCommandedAmps = null;
+    // Drop the previous car's charge snapshot from the holds file so a
+    // restart cannot paint the new VIN with the old car's battery/%.
+    this.persistHolds();
     if (this.status.override.enabled) {
       const held = this.paidHoldActive();
       this.sessionCredit = false;
@@ -498,6 +516,17 @@ export class ChargeController extends EventEmitter {
    * stale — that fallback is on the same gap, because Data calls are billed.
    */
   private async resolveVehicleState(): Promise<VehicleChargeState | null> {
+    if (!this.tesla.getVehicleTag()) {
+      // No dashboard pick yet (and none persisted). Do not invent a default
+      // VIN — leave the car unset and skip Tesla contact for this cycle.
+      this.haveFreshControlState = false;
+      this.status.decision = "unavailable";
+      this.status.teslaWait = "none";
+      this.status.nextTeslaAttemptAt = null;
+      this.status.telemetryLastSeenAt = null;
+      return null;
+    }
+
     const now = Date.now();
     const hint = this.telemetry?.getHint(this.tesla.getVehicleTag());
     const hintFresh = this.isHintFresh(hint, now);

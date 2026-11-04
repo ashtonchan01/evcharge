@@ -340,6 +340,7 @@ test("classic explicit 0W is used when SEMS+ login fails", async () => {
 
 test("a failed SEMS+ poll keeps the last solar snapshot and sets lastError", async () => {
   process.env.TESLA_HOLDS_PATH = "/tmp/evcharge-sems-plus-holds-missing.json";
+  process.env.ACTIVE_VEHICLE_PATH = `/tmp/evcharge-sems-plus-vehicle-${process.pid}.json`;
   const { ChargeController } = await import("../src/controller/index.js");
   const good = {
     timestamp: new Date(),
