@@ -139,22 +139,47 @@ function decisionView(status) {
   };
 }
 
+function nextPollLabel() {
+  if (!nextPollAt) return "";
+  const secsLeft = Math.round((nextPollAt - Date.now()) / 1000);
+  if (secsLeft > 0) return `Next check in ${secsLeft}s`;
+  return "Checking…";
+}
+
 function tickCountdown() {
-  if (latestStatus) {
-    const view = decisionView(latestStatus);
-    const decisionEl = $("decision");
-    if (decisionEl) {
-      decisionEl.textContent = view.label;
-      decisionEl.className = `decision-pill ${view.cls}`;
+  if (!latestStatus) {
+    setText("decision-note", "");
+    const pollEl = $("next-poll");
+    if (pollEl) {
+      pollEl.hidden = true;
+      pollEl.textContent = "";
     }
-    setText("decision-note", view.note || "");
-  }
-  if (!nextPollAt) {
-    setText("next-poll", "–");
     return;
   }
-  const secsLeft = Math.round((nextPollAt - Date.now()) / 1000);
-  setText("next-poll", secsLeft > 0 ? `${secsLeft}s` : "due");
+
+  const view = decisionView(latestStatus);
+  const decisionEl = $("decision");
+  if (decisionEl) {
+    decisionEl.textContent = view.label;
+    decisionEl.className = `decision-pill ${view.cls}`;
+  }
+
+  // Tesla wake / hold notes win. Otherwise show the thin next-poll countdown
+  // so the status bar is never an empty Online pill.
+  const note = view.note || "";
+  setText("decision-note", note);
+
+  const pollEl = $("next-poll");
+  if (pollEl) {
+    if (note) {
+      pollEl.hidden = true;
+      pollEl.textContent = "";
+    } else {
+      const poll = nextPollLabel();
+      pollEl.hidden = !poll;
+      pollEl.textContent = poll;
+    }
+  }
 }
 
 function render(status) {
@@ -182,12 +207,6 @@ function render(status) {
   setText("battery-label", batteryLevelRounded !== null ? `${batteryLevelRounded}%` : "–");
 
   latestStatus = status;
-  const view = decisionView(status);
-  const decisionEl = $("decision");
-  decisionEl.textContent = view.label;
-  decisionEl.className = `decision-pill ${view.cls}`;
-  setText("decision-note", view.note || "");
-
   setText("last-error", status.lastError || "");
 
   nextPollAt = status.lastPollAt ? new Date(status.lastPollAt).getTime() + status.pollIntervalMs : null;
