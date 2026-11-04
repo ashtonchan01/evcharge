@@ -108,16 +108,6 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
     res.json(controller.getStatus());
   });
 
-  app.post("/api/force-off", (req, res) => {
-    const { on } = req.body as { on?: boolean };
-    if (typeof on !== "boolean") {
-      res.status(400).json({ error: "on must be a boolean" });
-      return;
-    }
-    controller.setForceChargeOff(on, req.header("x-actor") ?? "dashboard");
-    res.json(controller.getStatus());
-  });
-
   app.post("/api/buffer", (req, res) => {
     const { bufferW } = req.body as { bufferW?: number };
 

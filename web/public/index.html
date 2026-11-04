@@ -15,7 +15,7 @@
   <meta name="apple-mobile-web-app-title" content="EVCharge" />
   <meta name="mobile-web-app-capable" content="yes" />
 
-  <link rel="stylesheet" href="/style.css?v=20261101b" />
+  <link rel="stylesheet" href="/style.css?v=20261104b" />
 </head>
 <body>
   <div class="bg-fx" aria-hidden="true">
@@ -27,7 +27,7 @@
   <main>
     <header class="topbar">
       <div class="brand">
-        <img src="/icons/icon-96.png" width="40" height="40" alt="" class="brand-icon" />
+        <img src="/icons/icon-96.png" width="32" height="32" alt="" class="brand-icon" />
         <div class="brand-text">
           <h1>Solar EV Charging</h1>
           <p class="subtitle">Live control</p>
@@ -59,97 +59,47 @@
       </div>
     </section>
 
-    <section class="cards">
-      <div class="card card-accent-cyan">
-        <h2>Solar</h2>
-        <dl>
-          <dt>PV production</dt><dd id="pv-2">–</dd>
-          <dt>Home load</dt><dd id="load-2">–</dd>
-          <dt>Grid</dt><dd id="grid">–</dd>
-          <dt>Surplus for EV</dt><dd id="surplus-2">–</dd>
-        </dl>
-      </div>
+    <div class="status-bar" aria-live="polite">
+      <p class="decision-pill" id="decision">–</p>
+      <p class="status-bar-note" id="decision-note"></p>
+    </div>
 
-      <div class="card card-accent-amber">
-        <h2>Vehicle</h2>
-        <div class="controls" style="margin-bottom: 14px;">
-          <select id="vehicle-select">
-            <option value="">Select vehicle…</option>
-          </select>
-        </div>
-        <div class="battery-gauge">
-          <div class="battery-gauge-fill" id="battery-fill"></div>
-          <span class="battery-gauge-label" id="battery-label">–</span>
-        </div>
-        <dl>
-          <dt>Plugged in</dt><dd id="plugged">–</dd>
-          <dt>Charging state</dt><dd id="charging-state">–</dd>
-          <dt>Charge amps</dt><dd id="amps">–</dd>
-          <dt>Charge limit</dt><dd id="charge-limit">–</dd>
-        </dl>
-        <!-- Not a login. autocomplete/one-time-code stops iOS Keychain offering a saved nubonus password. -->
-        <form id="charge-limit-form" class="buffer-row" autocomplete="off">
-          <label for="charge-limit-range">Set charge limit</label>
-          <div class="buffer-controls">
-            <input id="charge-limit-range" name="ev-charge-limit-slider" type="range" min="50" max="100" step="5" value="80" autocomplete="off" />
-            <input id="charge-limit-input" name="ev-charge-limit-percent" type="text" inputmode="numeric" pattern="[0-9]*" minlength="2" maxlength="3" placeholder="80" autocomplete="one-time-code" autocorrect="off" autocapitalize="off" spellcheck="false" />
-            <span class="buffer-unit">%</span>
-            <button type="submit">Set</button>
-          </div>
-        </form>
-        <p id="charge-limit-message"></p>
+    <section class="panel">
+      <select id="vehicle-select" aria-label="Vehicle">
+        <option value="">Select vehicle…</option>
+      </select>
+      <div class="battery-gauge">
+        <div class="battery-gauge-fill" id="battery-fill"></div>
+        <span class="battery-gauge-label" id="battery-label">–</span>
       </div>
-
-      <div class="card card-accent-violet">
-        <h2>Controller</h2>
-        <p class="decision-pill" id="decision">–</p>
-        <p class="decision-note" id="decision-note"></p>
-        <dl>
-          <dt>Target amps</dt><dd id="target-amps">–</dd>
-          <dt>Last poll</dt><dd id="last-poll">–</dd>
-          <dt>Next check</dt><dd id="next-poll">–</dd>
-        </dl>
-        <p id="last-error" class="error"></p>
-      </div>
-    </section>
-
-    <section class="override glass">
-      <h2>Solar charging</h2>
-      <div class="controls">
+      <p class="vehicle-meta">
+        <span id="charging-state">–</span>
+        <span id="amps">–</span>
+        <span id="plugged">–</span>
+        <span id="charge-limit">–</span>
+      </p>
+      <!-- Not a login. autocomplete/one-time-code stops iOS Keychain offering a saved password. -->
+      <form id="charge-limit-form" class="limit-row" autocomplete="off">
+        <span class="limit-label">Limit</span>
+        <input id="charge-limit-range" name="ev-charge-limit-slider" type="range" min="50" max="100" step="5" value="80" autocomplete="off" aria-label="Charge limit" />
+        <input id="charge-limit-input" name="ev-charge-limit-percent" type="text" inputmode="numeric" pattern="[0-9]*" minlength="2" maxlength="3" placeholder="80" autocomplete="one-time-code" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Charge limit percent" />
+        <span class="buffer-unit">%</span>
+        <button type="submit">Set</button>
+      </form>
+      <p id="charge-limit-message"></p>
+      <div class="solar-row">
         <label class="switch">
           <input type="checkbox" id="enabled-toggle" />
           <span class="slider"></span>
         </label>
-        <span id="enabled-label">On</span>
+        <span id="enabled-label">Off</span>
+        <span id="solar-hint" class="solar-hint">Off stops the car.</span>
       </div>
-      <div class="controls">
-        <button type="button" id="force-off-button" aria-pressed="false">⛔ Force off</button>
-        <span id="force-off-label">Off</span>
-      </div>
-      <p id="force-off-note" class="force-off-note">Stops the car. Solar on follows the sun.</p>
-
-      <!-- Not a login. Same Keychain guard as the charge-limit fields. -->
-      <form id="buffer-form" class="buffer-row" autocomplete="off">
-        <label for="buffer-range">Grid import buffer</label>
-        <div class="buffer-controls">
-          <input id="buffer-range" name="grid-import-buffer-slider" type="range" min="0" max="3000" step="50" value="0" autocomplete="off" />
-          <input id="buffer-input" name="grid-import-buffer-watts" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" placeholder="0" autocomplete="one-time-code" autocorrect="off" autocapitalize="off" spellcheck="false" />
-          <span class="buffer-unit">W</span>
-          <button type="submit">Set</button>
-        </div>
-      </form>
       <p id="override-message"></p>
-    </section>
-
-    <section class="override glass">
-      <h2>Notifications</h2>
-      <div class="controls">
-        <button type="button" id="notify-button">Enable notifications</button>
-      </div>
-      <p id="notify-message"></p>
+      <p id="last-error" class="error"></p>
     </section>
   </main>
 
-  <script src="/app.js?v=20261104a"></script>
+  <script src="/app.js?v=20261104b"></script>
 </body>
 </html>

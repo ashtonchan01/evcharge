@@ -83,18 +83,22 @@ body {
 /* ---------- layout ---------- */
 
 main {
-  max-width: 960px;
+  max-width: 440px;
   margin: 0 auto;
-  padding: calc(24px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
-    calc(64px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: calc(6px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+    calc(8px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
 }
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 28px;
+  gap: 8px;
+  margin: 0;
 }
 
 .brand {
@@ -104,13 +108,15 @@ main {
 }
 
 .brand-icon {
+  width: 32px;
+  height: 32px;
   border-radius: 22%;
   box-shadow: 0 4px 18px rgba(34, 211, 238, 0.35);
   display: block;
 }
 
 .brand-text h1 {
-  font-size: 1.25rem;
+  font-size: 1.05rem;
   margin: 0;
   letter-spacing: 0.01em;
 }
@@ -150,9 +156,9 @@ main {
   gap: 0;
   background: var(--card);
   border: 1px solid var(--card-border);
-  border-radius: 20px;
-  padding: 26px 12px;
-  margin-bottom: 20px;
+  border-radius: 16px;
+  padding: 12px 8px 8px;
+  margin: 0;
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
@@ -166,13 +172,13 @@ main {
 }
 
 .flow-icon {
-  width: 52px;
-  height: 52px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.4rem;
+  font-size: 1.15rem;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -196,10 +202,10 @@ main {
 
 .flow-line {
   flex: 1;
-  min-width: 24px;
-  max-width: 90px;
+  min-width: 18px;
+  max-width: 64px;
   height: 2px;
-  margin: 0 4px 22px;
+  margin: 0 2px 18px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 2px;
   position: relative;
@@ -273,10 +279,98 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
   font-size: 0.85rem;
 }
 
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+}
+
+.status-bar-note {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 16px;
+  padding: 10px 12px 8px;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.vehicle-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.limit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.limit-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.limit-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--cyan);
+}
+
+.limit-row input[type="text"] {
+  width: 52px;
+  padding: 6px 8px;
+}
+
+.limit-row button {
+  min-height: 36px;
+  padding: 6px 12px;
+}
+
+.solar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.solar-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
 .decision-pill {
   display: inline-block;
-  margin: 0 0 14px;
-  padding: 5px 12px;
+  margin: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 10px;
   border-radius: 999px;
   font-size: 0.82rem;
   font-weight: 700;
@@ -344,11 +438,11 @@ button[aria-pressed="true"] {
 
 .battery-gauge {
   position: relative;
-  height: 22px;
+  height: 18px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  margin-bottom: 16px;
+  margin: 8px 0 0;
   overflow: hidden;
 }
 
@@ -398,7 +492,7 @@ button[aria-pressed="true"] {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 
 .buffer-row label {
@@ -508,29 +602,27 @@ label {
 #enabled-label { font-weight: 600; }
 
 #override-message,
-#charge-limit-message { min-height: 1.2em; font-size: 0.9rem; color: var(--muted); }
-#charge-limit-message { margin: 8px 0 0; }
-#charge-limit-message.error { color: var(--bad); }
+#charge-limit-message,
+#last-error {
+  margin: 4px 0 0;
+  min-height: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+#override-message:empty,
+#charge-limit-message:empty,
+#last-error:empty { display: none; }
+#charge-limit-message.error,
+#last-error { color: var(--bad); }
 
 @media (max-width: 480px) {
-  main { padding-top: calc(16px + env(safe-area-inset-top)); }
-
-  .brand-text h1 { font-size: 1.1rem; }
-
-  .flow { padding: 20px 8px; }
-  .flow-node { min-width: 68px; }
-  .flow-icon { width: 44px; height: 44px; font-size: 1.2rem; }
-  .flow-value { font-size: 0.92rem; }
+  .flow-node { min-width: 72px; }
   .flow-line { max-width: 48px; }
 
-  .cards { grid-template-columns: 1fr; }
-
-  .card, .glass { padding: 15px 16px; }
-
   button {
-    padding: 11px 16px;
-    font-size: 1rem;
-    min-height: 44px;
+    padding: 8px 12px;
+    font-size: 0.95rem;
+    min-height: 36px;
   }
 
   .switch {

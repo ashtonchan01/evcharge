@@ -14,7 +14,7 @@ import {
   RecoveryPlan,
   TeslaWait,
 } from "./teslaRecovery.js";
-import { loadForceChargeOff, saveForceChargeOff } from "./chargeSettings.js";
+import { loadSolarEnabled, saveSolarEnabled } from "./chargeSettings.js";
 import { loadTeslaHolds, saveTeslaHolds } from "./teslaHolds.js";
 
 const log = logger.child({ module: "controller" });
@@ -54,11 +54,6 @@ export interface ControllerStatus {
   apiBudgetActive: boolean;
   /** Short non-error note, e.g. a command that was skipped because it repeated. */
   statusNote: string | null;
-  /**
-   * User asked to stop the car and keep it stopped, even when solar surplus
-   * would normally charge. Turning solar charging on clears this.
-   */
-  forceChargeOff: boolean;
 }
 
 /**
@@ -86,7 +81,6 @@ export class ChargeController extends EventEmitter {
     teslaWait: config.tesla.apiBudgetMode === "on" ? "budget" : "none",
     apiBudgetActive: config.tesla.apiBudgetMode === "on",
     statusNote: null,
-    forceChargeOff: false,
   };
 
   private timer: NodeJS.Timeout | null = null;
@@ -124,8 +118,6 @@ export class ChargeController extends EventEmitter {
   private lastStopCommandAt = 0;
   private lastAmpCommandAt = 0;
   private lastCommandedAmps: number | null = null;
-  /** Explicit "stop the car and keep it stopped". Cleared by turning solar on. */
-  private forceChargeOff = false;
   // Set on a 403/429 from Tesla - a hard signal to stop calling Tesla
   // entirely (reads, commands, wake_up) until this time, rather than
   // retrying every cycle into an account-level block that retrying won't
@@ -150,8 +142,10 @@ export class ChargeController extends EventEmitter {
     this.status.vehicleTag = tesla.getVehicleTag();
     this.status.telemetryEnabled = telemetry !== null;
     this.restoreHolds();
-    this.forceChargeOff = loadForceChargeOff();
-    this.status.forceChargeOff = this.forceChargeOff;
+    const savedEnabled = loadSolarEnabled();
+    if (savedEnabled !== null) {
+      this.status.override = { enabled: savedEnabled, setAt: null, setBy: "restart" };
+    }
   }
 
   private restoreHolds(): void {
@@ -313,13 +307,7 @@ export class ChargeController extends EventEmitter {
     log.info({ enabled, setBy }, "Enabled state changed");
     this.aboveStartThresholdCount = 0;
     this.belowStopThresholdCount = 0;
-    if (enabled && this.forceChargeOff) {
-      // Solar on means follow the sun again. Force-off is the pause.
-      this.forceChargeOff = false;
-      this.status.forceChargeOff = false;
-      saveForceChargeOff(false);
-      log.info({ setBy }, "Solar on cleared force-off");
-    }
+    saveSolarEnabled(enabled);
     if (enabled) {
       // Do not spend a paid probe during a billing/rate-limit hold, or when
       // the last snapshot already shows the car online. Otherwise contact
@@ -332,35 +320,22 @@ export class ChargeController extends EventEmitter {
       this.sessionProbePending = !held && !this.telemetryFreshNow() && !this.recentlyAwake();
       if (this.sessionProbePending) this.clearRecoveryCountdown();
     } else {
+      // Off stops the car and keeps it stopped, even when solar is abundant.
       this.sessionCredit = false;
       this.sessionProbePending = false;
+      this.explicitSession = true;
+      this.status.decision = "idle";
+      this.status.targetAmps = null;
     }
-    this.emitUpdate();
-    if (enabled) void this.tick();
-  }
-
-  /**
-   * Stop the car and refuse to start it again until this is cleared or
-   * solar charging is turned on. Solar off alone does not stop a session
-   * that is already running; this control does.
-   */
-  setForceChargeOff(on: boolean, setBy: string): void {
-    this.forceChargeOff = on;
-    this.status.forceChargeOff = on;
-    saveForceChargeOff(on);
-    log.info({ on, setBy }, "Force-off charging changed");
-    this.aboveStartThresholdCount = 0;
-    this.belowStopThresholdCount = 0;
-    this.status.decision = on ? "idle" : this.status.decision;
-    this.status.targetAmps = on ? null : this.status.targetAmps;
-    if (on) this.explicitSession = true;
     this.emitUpdate();
     void this.tick();
   }
 
-  setGridImportBufferW(bufferW: number, setBy: string): void {
-    log.info({ bufferW, setBy }, "Grid import buffer changed");
-    this.status.gridImportBufferW = bufferW;
+  setGridImportBufferW(_bufferW: number, setBy: string): void {
+    // The dash no longer exposes a buffer. Keep the endpoint so an old
+    // page cannot stick a reserve that would hide surplus.
+    log.info({ setBy }, "Ignoring grid import buffer; surplus stays the full balance");
+    this.status.gridImportBufferW = 0;
     this.emitUpdate();
   }
 
@@ -455,11 +430,10 @@ export class ChargeController extends EventEmitter {
         solar.loadPowerW === this.lastRawSolar.loadPowerW;
       this.lastRawSolar = { pvPowerW: solar.pvPowerW, loadPowerW: solar.loadPowerW };
 
-      // The true remaining balance: what's actually left over (or being
-      // drawn from the grid) after every load, including the EV, is
-      // accounted for. This is what we show and what start/stop decisions
-      // are based on.
-      const surplusW = solar.pvPowerW - solar.loadPowerW - this.status.gridImportBufferW;
+      // Full spare solar after house load. The grid-import buffer control
+      // was removed, so a value left in memory must not keep reserving watts.
+      this.status.gridImportBufferW = 0;
+      const surplusW = solar.pvPowerW - solar.loadPowerW;
       this.status.surplusW = surplusW;
 
       const controlVehicle = this.haveFreshControlState ? (vehicle ?? this.lastPolledVehicle) : null;
@@ -541,14 +515,9 @@ export class ChargeController extends EventEmitter {
     }
 
     if (!this.status.override.enabled) {
-      // Fully hands-off: never call Tesla (not even a read/poll) while
-      // disabled, so the dashboard and its toggle stay reachable without
-      // the app itself touching the vehicle - leaving the pm2 process
-      // running with the toggle off must be equivalent to stopping it,
-      // otherwise there's no way to reach the toggle to turn it back on
-      // without SSHing in. Free telemetry (if any) still updates the
-      // display; nothing else does. See evcharge_project memory,
-      // 2026-07-27.
+      // No polls or wakes while the switch is off, so a stuck car cannot
+      // lock the dashboard. decide() may still send one stop so the car
+      // does not keep charging. Free telemetry still updates the display.
       this.haveFreshControlState = hintFresh;
       return hintFresh ? this.buildStateFromHint(hint) : this.lastPolledVehicle;
     }
@@ -921,7 +890,9 @@ export class ChargeController extends EventEmitter {
 
   private async decide(surplusW: number, vehicle: VehicleChargeState | null, solarStale: boolean): Promise<void> {
     this.status.statusNote = null;
-    if (this.forceChargeOff) {
+    if (!this.status.override.enabled) {
+      // The charging switch is the only off control. Off stops the car and
+      // does not start it again while surplus is high. On follows the sun.
       await this.holdChargeOff(vehicle ?? this.status.vehicle);
       return;
     }
@@ -951,22 +922,6 @@ export class ChargeController extends EventEmitter {
       })
     ) {
       this.publishBlockStatus();
-      return;
-    }
-
-    if (!this.status.override.enabled) {
-      // Fully hands-off when disabled - no commands to the vehicle at all,
-      // not even a "cleanup" stop. This used to stop_charge whenever it
-      // saw "Charging" while disabled (on the assumption evcharge itself
-      // had started that session), but that meant the toggle only ever
-      // controlled evcharge's own *decisions*, not whether it touched the
-      // car - with the pm2 process left running, it kept firing charge_stop
-      // at any session it saw, including ones started by something else
-      // entirely (ChargeHQ, the Tesla app, manual start) - see
-      // evcharge_project memory, 2026-07-27. The toggle is now the actual
-      // on/off switch: disabled means don't send anything, full stop.
-      this.status.decision = "idle";
-      this.status.targetAmps = null;
       return;
     }
 
@@ -1100,27 +1055,37 @@ export class ChargeController extends EventEmitter {
   }
 
   /**
-   * Force-off: stop a charging car and never start one, surplus or not.
-   * Quiet hours and the solar-off hands-off path do not apply here — the
-   * user asked for the car to stop. Rate-limit and billing holds still do.
+   * Charging switch is off. Stop a car that is still charging, and do not
+   * start one, even when solar surplus is high. Rate-limit and billing
+   * holds still block the stop command.
    */
   private async holdChargeOff(known: VehicleChargeState | null): Promise<void> {
     this.status.decision = "idle";
     this.status.targetAmps = null;
     this.aboveStartThresholdCount = 0;
     const charging = known?.chargingState === "Charging" || known?.chargingState === "Starting";
-    if (!charging) {
-      this.status.statusNote = "Force off — car stays stopped";
-      return;
-    }
+    if (!charging) return;
     const stopped = await this.sendStop();
     if (stopped === "blocked") {
       this.publishBlockStatus();
       return;
     }
     if (stopped === "held") this.status.statusNote = this.holdNote("Stop already sent", this.lastStopCommandAt);
-    else if (stopped === "sent") this.status.statusNote = "Force off — charging stopped";
-    else this.status.statusNote = "Force off — stop did not reach the car";
+    else if (stopped === "sent") {
+      this.status.statusNote = "Charging stopped";
+      this.markChargingStopped();
+    } else this.status.statusNote = "Stop did not reach the car";
+  }
+
+  private markChargingStopped(): void {
+    const stopped = (vehicle: VehicleChargeState): VehicleChargeState => ({
+      ...vehicle,
+      chargingState: "Stopped",
+      chargeAmps: 0,
+      chargerActualCurrent: 0,
+    });
+    if (this.status.vehicle) this.status.vehicle = stopped(this.status.vehicle);
+    if (this.lastPolledVehicle) this.lastPolledVehicle = stopped(this.lastPolledVehicle);
   }
 
   /**
