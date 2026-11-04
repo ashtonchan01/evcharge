@@ -147,22 +147,21 @@ describe("stale charge rate and force-off", () => {
     internal.lastPolledVehicle = charging;
     internal.status.vehicle = charging;
 
-    controller.setForceChargeOff(true, "test");
+    controller.setEnabled(false, "test");
     for (let i = 0; i < 50 && internal.tickInFlight; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(controller.getStatus().forceChargeOff, true);
+    assert.equal(controller.getStatus().override.enabled, false);
     assert.equal(stops.length, 1);
     assert.equal(starts.length, 0);
     assert.equal(controller.getStatus().targetAmps, null);
 
     const restarted = new ChargeController(goodwe as never, tesla as never, null);
-    assert.equal(restarted.getStatus().forceChargeOff, true);
+    assert.equal(restarted.getStatus().override.enabled, false);
 
     controller.setEnabled(true, "test");
-    assert.equal(controller.getStatus().forceChargeOff, false);
-    assert.equal(restarted.getStatus().forceChargeOff, true);
-    const { loadForceChargeOff } = await import("../src/controller/chargeSettings.ts");
-    assert.equal(loadForceChargeOff(), false);
+    assert.equal(controller.getStatus().override.enabled, true);
+    const { loadSolarEnabled } = await import("../src/controller/chargeSettings.ts");
+    assert.equal(loadSolarEnabled(), true);
   });
 });

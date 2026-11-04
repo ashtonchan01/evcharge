@@ -163,12 +163,8 @@ function render(status) {
   const load = s ? s.loadPowerW : null;
 
   setText("pv", fmtW(pv));
-  setText("pv-2", fmtW(pv));
   setText("load", fmtW(load));
-  setText("load-2", fmtW(load));
-  setText("grid", s ? fmtW(s.gridPowerW) : "–");
   setText("surplus", fmtW(status.surplusW));
-  setText("surplus-2", fmtW(status.surplusW));
 
   $("line-solar").classList.toggle("active", (pv || 0) > 50);
   $("line-surplus").classList.toggle("active", (status.surplusW || 0) > 50);
@@ -192,8 +188,6 @@ function render(status) {
   decisionEl.className = `decision-pill ${view.cls}`;
   setText("decision-note", view.note || "");
 
-  setText("target-amps", status.targetAmps !== null ? `${Math.round(status.targetAmps)} A` : "–");
-  setText("last-poll", fmtTime(status.lastPollAt));
   setText("last-error", status.lastError || "");
 
   nextPollAt = status.lastPollAt ? new Date(status.lastPollAt).getTime() + status.pollIntervalMs : null;
@@ -201,24 +195,9 @@ function render(status) {
 
   $("enabled-toggle").checked = status.override.enabled;
   setText("enabled-label", status.override.enabled ? "On" : "Off");
-
-  const forced = Boolean(status.forceChargeOff);
-  const forceBtn = $("force-off-button");
-  if (forceBtn) forceBtn.setAttribute("aria-pressed", forced ? "true" : "false");
-  setText("force-off-label", forced ? "On" : "Off");
-  setText(
-    "force-off-note",
-    forced ? "Car stays off. Solar on follows the sun." : "Stops the car. Solar on follows the sun."
-  );
+  setText("solar-hint", status.override.enabled ? "Follows the sun." : "Stops the car.");
 
   ensureVehicleOption(status.vehicleTag);
-
-  const bufferInput = $("buffer-input");
-  const bufferRange = $("buffer-range");
-  if (document.activeElement !== bufferInput && document.activeElement !== bufferRange) {
-    bufferInput.value = status.gridImportBufferW || "";
-    bufferRange.value = status.gridImportBufferW || 0;
-  }
 
   const chargeLimitInput = $("charge-limit-input");
   const chargeLimitRange = $("charge-limit-range");
@@ -396,7 +375,6 @@ $("vehicle-select").addEventListener("change", async (e) => {
 
 $("enabled-toggle").addEventListener("change", async (e) => {
   const enabled = e.target.checked;
-  const wasForced = Boolean(latestStatus && latestStatus.forceChargeOff);
 
   const res = await fetch("/api/enabled", {
     method: "POST",
@@ -412,59 +390,7 @@ $("enabled-toggle").addEventListener("change", async (e) => {
   }
 
   render(await res.json());
-  if (enabled && wasForced) flash("override-message", "Solar on. Force off cleared.");
-  else flash("override-message", enabled ? "Solar charging turned on." : "Solar charging turned off.");
-});
-
-$("force-off-button").addEventListener("click", async () => {
-  const on = $("force-off-button").getAttribute("aria-pressed") !== "true";
-  const res = await fetch("/api/force-off", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify({ on }),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    flash("override-message", body.error || `Couldn't set force off (${res.status}).`);
-    return;
-  }
-  render(body);
-  flash("override-message", on ? "Force off on. Car will stop." : "Force off cleared.");
-});
-
-$("buffer-range").addEventListener("input", (e) => {
-  $("buffer-input").value = e.target.value;
-});
-
-$("buffer-input").addEventListener("input", (e) => {
-  if (e.target.value !== "") $("buffer-range").value = e.target.value;
-});
-
-$("buffer-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const raw = $("buffer-input").value;
-  const bufferW = raw === "" ? 0 : Number(raw);
-
-  if (!Number.isFinite(bufferW) || bufferW < 0) {
-    flash("override-message", "Buffer must be a non-negative number.");
-    return;
-  }
-
-  const res = await fetch("/api/buffer", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bufferW }),
-  });
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    flash("override-message", `Error: ${body.error || res.status}`);
-    return;
-  }
-
-  render(await res.json());
-  flash("override-message", `Grid import buffer set to ${bufferW} W.`);
+  flash("override-message", enabled ? "On. Follows the sun." : "Off. Car stays stopped.");
 });
 
 function urlBase64ToUint8Array(base64String) {
@@ -474,69 +400,46 @@ function urlBase64ToUint8Array(base64String) {
   return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
 }
 
-async function refreshNotifyButton() {
-  const button = $("notify-button");
-  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-    button.disabled = true;
-    button.textContent = "Notifications not supported in this browser";
-    return;
-  }
+let pushEnsureStarted = false;
 
-  if (Notification.permission === "denied") {
-    button.disabled = true;
-    button.textContent = "Notifications blocked in browser settings";
-    return;
-  }
-
-  const registration = await navigator.serviceWorker.ready;
-  const existing = await registration.pushManager.getSubscription();
-  button.textContent = existing ? "Notifications enabled" : "Enable notifications";
-  button.disabled = Boolean(existing);
-}
-
-async function enablePush() {
-  const button = $("notify-button");
+async function ensurePush() {
+  if (pushEnsureStarted) return;
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) return;
+  if (Notification.permission === "denied") return;
+  pushEnsureStarted = true;
   try {
-    const keyRes = await fetch("/api/push/public-key");
-    const { publicKey, enabled } = await keyRes.json();
-    if (!enabled || !publicKey) {
-      flash("notify-message", "Push notifications aren't configured on the server.");
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
+    let permission = Notification.permission;
+    if (permission === "default") permission = await Notification.requestPermission();
     if (permission !== "granted") {
-      flash("notify-message", "Notification permission was not granted.");
+      pushEnsureStarted = false;
       return;
     }
-
     const registration = await navigator.serviceWorker.ready;
+    if (await registration.pushManager.getSubscription()) return;
+    const keyRes = await fetch("/api/push/public-key", { cache: "no-store" });
+    const { publicKey, enabled } = await keyRes.json();
+    if (!enabled || !publicKey) return;
     const subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     });
-
     await fetch("/api/push/subscribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(subscription),
     });
-
-    flash("notify-message", "Notifications enabled - you'll get an alert when charging completes.");
-    await refreshNotifyButton();
-  } catch (err) {
-    flash("notify-message", `Couldn't enable notifications: ${err.message || err}`);
+  } catch {
+    pushEnsureStarted = false;
   }
 }
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker
     .register("/sw.js")
-    .then(() => refreshNotifyButton())
+    .then(() => ensurePush())
     .catch(() => {});
 }
-
-$("notify-button").addEventListener("click", enablePush);
+document.addEventListener("pointerdown", () => void ensurePush(), { once: true });
 
 $("charge-limit-range").addEventListener("input", (e) => {
   $("charge-limit-input").value = e.target.value;
