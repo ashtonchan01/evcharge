@@ -28,6 +28,10 @@ function publicTeslaError(err: unknown): string {
 export function createApp(controller: ChargeController, tesla: TeslaFleetClient, push: PushService) {
   const app = express();
   app.use(express.json());
+  app.use("/api", (_req, res, next) => {
+    res.set("Cache-Control", "no-store");
+    next();
+  });
   app.use(express.static(path.join(__dirname, "../../web/public")));
 
   let vehicleCache: { vehicles: VehicleSummary[]; cachedAt: number } | null = null;
@@ -101,6 +105,16 @@ export function createApp(controller: ChargeController, tesla: TeslaFleetClient,
     }
 
     controller.setEnabled(enabled, req.header("x-actor") ?? "dashboard");
+    res.json(controller.getStatus());
+  });
+
+  app.post("/api/force-off", (req, res) => {
+    const { on } = req.body as { on?: boolean };
+    if (typeof on !== "boolean") {
+      res.status(400).json({ error: "on must be a boolean" });
+      return;
+    }
+    controller.setForceChargeOff(on, req.header("x-actor") ?? "dashboard");
     res.json(controller.getStatus());
   });
 

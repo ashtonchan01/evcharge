@@ -202,6 +202,15 @@ function render(status) {
   $("enabled-toggle").checked = status.override.enabled;
   setText("enabled-label", status.override.enabled ? "On" : "Off");
 
+  const forced = Boolean(status.forceChargeOff);
+  const forceBtn = $("force-off-button");
+  if (forceBtn) forceBtn.setAttribute("aria-pressed", forced ? "true" : "false");
+  setText("force-off-label", forced ? "On" : "Off");
+  setText(
+    "force-off-note",
+    forced ? "Car stays off. Solar on follows the sun." : "Stops the car. Solar on follows the sun."
+  );
+
   ensureVehicleOption(status.vehicleTag);
 
   const bufferInput = $("buffer-input");
@@ -227,8 +236,13 @@ function render(status) {
 }
 
 async function fetchStatus() {
-  const res = await fetch("/api/status");
-  render(await res.json());
+  try {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) return;
+    render(await res.json());
+  } catch {
+    // Keep the last paint. The next poll or a reopened socket will retry.
+  }
 }
 
 function vehicleOptions() {
@@ -382,6 +396,7 @@ $("vehicle-select").addEventListener("change", async (e) => {
 
 $("enabled-toggle").addEventListener("change", async (e) => {
   const enabled = e.target.checked;
+  const wasForced = Boolean(latestStatus && latestStatus.forceChargeOff);
 
   const res = await fetch("/api/enabled", {
     method: "POST",
@@ -397,7 +412,25 @@ $("enabled-toggle").addEventListener("change", async (e) => {
   }
 
   render(await res.json());
-  flash("override-message", enabled ? "Solar charging turned on." : "Solar charging turned off.");
+  if (enabled && wasForced) flash("override-message", "Solar on. Force off cleared.");
+  else flash("override-message", enabled ? "Solar charging turned on." : "Solar charging turned off.");
+});
+
+$("force-off-button").addEventListener("click", async () => {
+  const on = $("force-off-button").getAttribute("aria-pressed") !== "true";
+  const res = await fetch("/api/force-off", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ on }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    flash("override-message", body.error || `Couldn't set force off (${res.status}).`);
+    return;
+  }
+  render(body);
+  flash("override-message", on ? "Force off on. Car will stop." : "Force off cleared.");
 });
 
 $("buffer-range").addEventListener("input", (e) => {
@@ -557,9 +590,14 @@ $("charge-limit-form").addEventListener("submit", async (e) => {
   }
 });
 
+let socket = null;
+let reconnectTimer = null;
+
 function connectWs() {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  socket = ws;
 
   ws.addEventListener("open", () => {
     $("conn-indicator").classList.remove("dot-off");
@@ -568,10 +606,12 @@ function connectWs() {
   });
 
   ws.addEventListener("close", () => {
+    if (socket === ws) socket = null;
     $("conn-indicator").classList.remove("dot-on");
     $("conn-indicator").classList.add("dot-off");
     setText("conn-label", "Reconnecting…");
-    setTimeout(connectWs, 2000);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectWs, 2000);
   });
 
   ws.addEventListener("message", (event) => {
@@ -580,7 +620,18 @@ function connectWs() {
   });
 }
 
+function refreshLive() {
+  void fetchStatus();
+  if (!socket || socket.readyState !== WebSocket.OPEN) connectWs();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshLive();
+});
+window.addEventListener("pageshow", () => refreshLive());
+
 fetchStatus();
 loadVehicles();
 connectWs();
+setInterval(() => void fetchStatus(), 20000);
 setInterval(tickCountdown, 1000);
