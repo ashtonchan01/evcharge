@@ -18,7 +18,10 @@ const schema = z.object({
   MIN_CHARGE_AMPS: numeric().default("5"),
   MAX_CHARGE_AMPS: numeric().default("32"),
   STABLE_CYCLES_TO_START: numeric().default("2"),
-  STABLE_CYCLES_TO_STOP: numeric().default("2"),
+  // One low-solar poll stops charging for whichever car is selected.
+  // Missing or stale fleet telemetry does not add a second cycle.
+  // A VM .env value overrides this default (the live host has used 2).
+  STABLE_CYCLES_TO_STOP: numeric().default("1"),
 
   GOODWE_SEMS_ACCOUNT: z.string().min(1),
   GOODWE_SEMS_PASSWORD: z.string().min(1),

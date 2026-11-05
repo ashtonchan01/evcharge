@@ -331,7 +331,17 @@ All thresholds live in `.env`:
 - `MIN_SURPLUS_START_W` / `MIN_SURPLUS_STOP_W` — hysteresis band so surplus
   hovering near zero doesn't start/stop every cycle.
 - `STABLE_CYCLES_TO_START` / `STABLE_CYCLES_TO_STOP` — how many
-  consecutive polls a condition must hold before acting.
+  consecutive polls a condition must hold before acting. Stop defaults
+  to **1** for whichever vehicle is selected (Model 3 or Model X). That
+  single cycle applies with fresh fleet telemetry, with no stream, and
+  when the last reading is stale. The existing poll and telemetry paths
+  are unchanged. `STABLE_CYCLES_TO_START` stays 2 in this repo's default
+  (the VM `.env` may already set it to 1).
+
+  The process reads `.env` over the code default. The running host has
+  `STABLE_CYCLES_TO_STOP=2`, which keeps the two-cycle stop until that
+  line is set to `1` (or removed) and evcharge is restarted. This change
+  does not edit the VM.
 - `MIN_CHARGE_AMPS` / `MAX_CHARGE_AMPS` — Tesla's charge amp floor/ceiling
   for your charging equipment.
 

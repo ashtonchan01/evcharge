@@ -657,6 +657,10 @@ label {
 #last-error { color: var(--bad); }
 
 @media (max-width: 480px) {
+  /* Card-to-card only. Inner padding on .flow / .panel / .card stays roomy. */
+  main { gap: 12px; }
+  .cards { gap: 10px; margin-bottom: 10px; }
+
   .brand-text h1 { font-size: 0.95rem; }
   .top-actions { gap: 6px; }
   .flow-node { min-width: 72px; }

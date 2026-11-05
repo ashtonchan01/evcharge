@@ -1120,10 +1120,10 @@ export class ChargeController extends EventEmitter {
     const targetSurplusW = surplusW + evDrawW;
     const ampsAvailable = this.ampsAvailable(surplusW, vehicle);
 
-    // Ramp amps down as the available surplus shrinks; only stop outright
-    // once even the minimum charge rate isn't sustainable for a couple of
-    // consecutive polls, rather than cutting straight to zero the moment
-    // the balance dips negative. While we are still confirming a start,
+    // Ramp amps down as the available surplus shrinks; stop outright once
+    // the minimum charge rate isn't sustainable for STABLE_CYCLES_TO_STOP
+    // polls (default 1), for any selected vehicle. A missing or stale
+    // telemetry stream does not add cycles. While we are still confirming a start,
     // chargerVoltage/current are often still 0, so surplus looks too low
     // (house load already includes the car) — do not count that as a stop.
     if (ampsAvailable < config.minChargeAmps) {
