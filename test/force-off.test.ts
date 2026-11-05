@@ -94,10 +94,6 @@ describe("stale charge rate and force-off", () => {
     internal.sessionProbePending = false;
 
     await internal.tick();
-    assert.equal(stops.length, 0);
-    assert.match(controller.getStatus().statusNote ?? "", /stop if this holds/);
-
-    await internal.tick();
     assert.equal(stops.length, 1);
     assert.equal(starts.length, 0);
     assert.equal(controller.getStatus().targetAmps, null);
@@ -221,5 +217,72 @@ describe("stale charge rate and force-off", () => {
     await internal.tick();
     assert.equal(snapshots, 3);
     assert.equal(chargeReads, 1);
+  });
+
+  it("stops on one low-solar cycle for Model 3 and Model X with no telemetry", async () => {
+    useTempSettings();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    const { config } = await import("../src/config.ts");
+    assert.equal(config.stableCyclesToStop, 1);
+
+    const vins = ["5YJ3F7EA5KF461091", "5YJXDCE25JF080915"];
+    for (const vin of vins) {
+      const stops: string[] = [];
+      let polls = 0;
+      let tag = vin;
+      const goodwe = {
+        async getSnapshot() {
+          return solar(800, 4000);
+        },
+      };
+      const tesla = {
+        getVehicleTag: () => tag,
+        setVehicleTag(next: string) {
+          tag = next;
+        },
+        async getChargeState() {
+          polls += 1;
+          throw new Error("no telemetry and recovery gap is closed");
+        },
+        async wakeUp() {
+          throw new Error("should not wake");
+        },
+        async startCharging() {
+          throw new Error("should not start");
+        },
+        async stopCharging() {
+          stops.push(tag);
+        },
+        async setChargeAmps() {
+          throw new Error("should not set amps");
+        },
+      };
+      const controller = new ChargeController(goodwe as never, tesla as never, null);
+      const internal = controller as unknown as {
+        tick(): Promise<void>;
+        status: { override: { enabled: boolean }; vehicle: ReturnType<typeof chargingAt> | null; vehicleTag: string };
+        lastPolledVehicle: ReturnType<typeof chargingAt> | null;
+        lastFallbackAttemptAt: number;
+        consecutiveFailures: number;
+        sessionProbePending: boolean;
+      };
+      controller.setVehicleTag(vin, "test");
+      for (let i = 0; i < 20 && (controller as unknown as { tickInFlight: boolean }).tickInFlight; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const charging = chargingAt(12);
+      internal.status.override.enabled = true;
+      internal.status.vehicle = charging;
+      internal.lastPolledVehicle = charging;
+      internal.lastFallbackAttemptAt = Date.now();
+      internal.consecutiveFailures = 2;
+      internal.sessionProbePending = false;
+
+      await internal.tick();
+      assert.equal(internal.status.vehicleTag, vin);
+      assert.deepEqual(stops, [vin]);
+      assert.equal(polls, 0);
+      assert.equal(controller.getStatus().targetAmps, null);
+    }
   });
 });
