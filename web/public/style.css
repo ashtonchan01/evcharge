@@ -88,9 +88,9 @@ main {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: calc(6px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
-    calc(8px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  gap: 22px;
+  padding: calc(12px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
+    calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));
 }
 
 .topbar {
@@ -165,7 +165,7 @@ main {
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: 16px;
-  padding: 12px 8px 8px;
+  padding: 22px 12px 18px;
   margin: 0;
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
@@ -175,7 +175,7 @@ main {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 84px;
 }
 
@@ -290,10 +290,10 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 .status-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 28px;
+  gap: 10px;
+  min-height: 44px;
   margin: 0;
-  padding: 4px 10px;
+  padding: 8px 14px;
   border-radius: 999px;
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -329,7 +329,7 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: 16px;
-  padding: 10px 12px 8px;
+  padding: 18px 16px 16px;
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
@@ -337,15 +337,15 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 .vehicle-meta {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 2px 6px;
-  margin: 6px 0 8px;
+  gap: 6px 8px;
+  margin: 18px 0 20px;
 }
 
 .vehicle-meta-item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -370,7 +370,8 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 .limit-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  margin-top: 4px;
 }
 
 .limit-label {
@@ -383,6 +384,7 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 .limit-row input[type="range"] {
   flex: 1;
   min-width: 0;
+  height: 36px;
   accent-color: var(--cyan);
 }
 
@@ -392,8 +394,8 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 }
 
 .limit-row button {
-  min-height: 36px;
-  padding: 6px 12px;
+  min-height: 40px;
+  padding: 8px 14px;
 }
 
 .solar-row {
@@ -481,7 +483,7 @@ button[aria-pressed="true"] {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  margin: 8px 0 0;
+  margin: 16px 0 0;
   overflow: hidden;
 }
 
@@ -667,16 +669,24 @@ label {
   }
 
   .switch {
-    width: 54px;
-    height: 32px;
+    width: 58px;
+    height: 34px;
   }
 
   .switch .slider::before {
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
   }
 
-  .switch input:checked + .slider::before { transform: translateX(22px); }
+  .switch input:checked + .slider::before { transform: translateX(24px); }
+
+  .limit-row button {
+    min-height: 44px;
+  }
+
+  .limit-row input[type="range"] {
+    height: 40px;
+  }
 
   select { min-height: 44px; }
 }
