@@ -202,18 +202,19 @@ describe("charge command dedup and cooldowns", () => {
         };
       },
     };
+    let reportCharging = false;
     const tesla = {
       getVehicleTag: () => "5YJ3TESTVIN000001",
       setVehicleTag() {},
       async getChargeState() {
         polls.push(Date.now());
         return {
-          chargingState: "Stopped",
+          chargingState: reportCharging ? "Charging" : "Stopped",
           chargeAmps: 5,
           chargeLimitSoc: 80,
           batteryLevel: 50,
-          chargerVoltage: 240,
-          chargerActualCurrent: 0,
+          chargerVoltage: reportCharging ? 240 : 0,
+          chargerActualCurrent: reportCharging ? 5 : 0,
           pluggedIn: true,
           timestamp: new Date(),
         };
@@ -223,9 +224,11 @@ describe("charge command dedup and cooldowns", () => {
       },
       async startCharging() {
         starts.push(Date.now());
+        reportCharging = true;
       },
       async stopCharging() {
         stops.push(Date.now());
+        reportCharging = false;
       },
       async setChargeAmps(value: number) {
         amps.push(value);
@@ -238,6 +241,7 @@ describe("charge command dedup and cooldowns", () => {
       sendStart(): Promise<string>;
       sendStop(): Promise<string>;
       sendAmps(target: number, reported: number): Promise<string>;
+      chargeStartConfirmPending: boolean;
     };
 
     controller.setEnabled(true, "test");
@@ -249,11 +253,16 @@ describe("charge command dedup and cooldowns", () => {
     assert.ok(starts.length <= 1, "start is not repeated on the next tick");
 
     const startsBefore = starts.length;
+    const pollsBeforeStart = polls.length;
     const firstStart = await internal.sendStart();
     const secondStart = await internal.sendStart();
     if (startsBefore === 0) {
       assert.equal(firstStart, "sent");
       assert.equal(secondStart, "held");
+      // charge_start spends one confirm vehicle_data (not a per-cycle poll).
+      assert.equal(polls.length, pollsBeforeStart + 1, "one confirm poll after charge_start");
+      assert.equal(controller.getStatus().vehicle?.chargingState, "Charging");
+      assert.equal(internal.chargeStartConfirmPending, false);
     } else {
       assert.equal(firstStart, "held");
       assert.equal(secondStart, "held");
@@ -290,6 +299,101 @@ describe("charge command dedup and cooldowns", () => {
       assert.ok(budgetAt - billBefore >= config.tesla.apiBudgetCooldownMs - 50);
       assert.ok((status.rateLimitedUntil?.getTime() ?? 0) >= firstUntil);
     }
+  });
+});
+
+describe("charge_start confirmation", () => {
+  it("leaves Stopped / 0 V after charge_start and confirms Charging on the next poll", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+
+    let starts = 0;
+    let pollsAfterStart = 0;
+    const goodwe = {
+      async getSnapshot() {
+        return {
+          timestamp: new Date(),
+          pvPowerW: 4000,
+          loadPowerW: 400,
+          gridPowerW: -3600,
+          batteryPowerW: 0,
+          batterySoc: 0,
+        };
+      },
+    };
+    const stopped = {
+      chargingState: "Stopped",
+      chargeAmps: 5,
+      chargeLimitSoc: 90,
+      batteryLevel: 83,
+      chargerVoltage: 0,
+      chargerActualCurrent: 0,
+      pluggedIn: true,
+      timestamp: new Date(),
+    };
+    const charging = {
+      chargingState: "Charging",
+      chargeAmps: 5,
+      chargeLimitSoc: 90,
+      batteryLevel: 83,
+      chargerVoltage: 243,
+      chargerActualCurrent: 5,
+      pluggedIn: true,
+      timestamp: new Date(),
+    };
+    const tesla = {
+      getVehicleTag: () => "5YJXDCE25JF080915",
+      setVehicleTag() {},
+      async getChargeState() {
+        if (starts === 0) return { ...stopped, timestamp: new Date() };
+        pollsAfterStart += 1;
+        // Tesla often still reports Stopped on the immediate post-start read.
+        if (pollsAfterStart === 1) return { ...stopped, timestamp: new Date() };
+        return { ...charging, timestamp: new Date() };
+      },
+      async wakeUp() {},
+      async startCharging() {
+        starts += 1;
+      },
+      async stopCharging() {},
+      async setChargeAmps() {},
+    };
+
+    const controller = new ChargeController(goodwe as never, tesla as never, null);
+    const internal = controller as unknown as {
+      tick(): Promise<void>;
+      aboveStartThresholdCount: number;
+      lastFallbackAttemptAt: number;
+      sessionProbePending: boolean;
+      chargeStartConfirmPending: boolean;
+    };
+
+    controller.setEnabled(true, "test");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(starts, 0, "enable probe alone does not start (needs stable cycles)");
+
+    // Second stable cycle with a fresh Stopped poll (production: session/recovery
+    // read), then charge_start. Immediate confirm still returns Stopped.
+    internal.aboveStartThresholdCount = 1;
+    internal.sessionProbePending = true;
+    await internal.tick();
+
+    assert.equal(starts, 1);
+    const afterStart = controller.getStatus();
+    // Immediate confirm still saw Stopped — display must be optimistic Starting.
+    assert.equal(afterStart.vehicle?.chargingState, "Starting");
+    assert.equal(afterStart.decision, "charging");
+    assert.equal(internal.chargeStartConfirmPending, true);
+
+    // Next tick polls again inside the recovery gap and picks up live fields.
+    internal.sessionProbePending = false;
+    await internal.tick();
+    const confirmed = controller.getStatus();
+    assert.equal(confirmed.vehicle?.chargingState, "Charging");
+    assert.equal(confirmed.vehicle?.chargerVoltage, 243);
+    assert.equal(confirmed.vehicle?.chargerActualCurrent, 5);
+    assert.equal(confirmed.decision, "charging");
+    assert.equal(internal.chargeStartConfirmPending, false);
   });
 });
 
