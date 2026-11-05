@@ -118,6 +118,13 @@ export class ChargeController extends EventEmitter {
   private lastStopCommandAt = 0;
   private lastAmpCommandAt = 0;
   private lastCommandedAmps: number | null = null;
+  /**
+   * charge_start was accepted but vehicle_data / telemetry has not yet
+   * reported Charging. Until then the dash must not keep a pre-start
+   * Stopped / 0 V / 0 A snapshot, and recovery may poll once per tick
+   * (inside the normal gap) to confirm the session.
+   */
+  private chargeStartConfirmPending = false;
   // Set on a 403/429 from Tesla - a hard signal to stop calling Tesla
   // entirely (reads, commands, wake_up) until this time, rather than
   // retrying every cycle into an account-level block that retrying won't
@@ -562,6 +569,7 @@ export class ChargeController extends EventEmitter {
     // into the poll fallback below instead of treating an actively-charging
     // vehicle as unplugged/idle.
     if (hintFresh && hint.chargingState === "Charging") {
+      this.chargeStartConfirmPending = false;
       const chargingDataFresh =
         hint.chargingDataLastSeenAt !== null &&
         now - hint.chargingDataLastSeenAt.getTime() <= config.tesla.telemetryChargingStaleMs;
@@ -592,6 +600,13 @@ export class ChargeController extends EventEmitter {
       return this.buildStateFromHint(hint);
     }
 
+    // After charge_start, do not trust a fresh Stopped hint or the recovery
+    // gap — confirm with vehicle_data (or keep the optimistic Starting
+    // snapshot) until the car reports Charging.
+    if (this.chargeStartConfirmPending) {
+      return this.pollForChargeStartConfirm();
+    }
+
     if (hintFresh) {
       this.haveFreshControlState = true;
       this.sessionProbePending = false;
@@ -601,6 +616,42 @@ export class ChargeController extends EventEmitter {
     }
 
     return this.pollForRecovery(plan);
+  }
+
+  /**
+   * One vehicle_data read to replace the optimistic Starting snapshot with
+   * live charge fields. If Tesla still says Stopped (common for a few
+   * seconds after charge_start), keep Starting and try again next tick.
+   */
+  private async pollForChargeStartConfirm(): Promise<VehicleChargeState | null> {
+    if (!this.armPaidCall()) {
+      this.haveFreshControlState = false;
+      this.publishBlockStatus();
+      return this.lastPolledVehicle;
+    }
+
+    const polled = await this.pollDirect();
+    if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil) {
+      this.haveFreshControlState = false;
+      this.publishBlockStatus();
+      return this.lastPolledVehicle;
+    }
+
+    if (polled && (polled.chargingState === "Charging" || polled.chargingState === "Starting")) {
+      this.chargeStartConfirmPending = false;
+      this.haveFreshControlState = true;
+      this.status.teslaWait = "none";
+      this.status.nextTeslaAttemptAt = null;
+      return polled;
+    }
+
+    // Still Stopped / unreachable — keep Starting on screen so the dash
+    // does not freeze on the pre-start Stopped / 0 V / 0 A reading.
+    this.markChargingStarting();
+    this.haveFreshControlState = false;
+    this.status.teslaWait = "none";
+    this.status.nextTeslaAttemptAt = null;
+    return this.lastPolledVehicle;
   }
 
   private isHintFresh(hint: TelemetryHint | undefined, now: number): hint is TelemetryHint {
@@ -982,8 +1033,12 @@ export class ChargeController extends EventEmitter {
     // Trust the vehicle's own reported state, not our memory of what commands
     // we've sent - a command can silently fail to reach the car (e.g. asleep,
     // signed-command proxy timeout) and we'd otherwise get stuck believing
-    // it's charging when it never started.
-    const currentlyCharging = vehicle.chargingState === "Charging";
+    // it's charging when it never started. "Starting" is the optimistic /
+    // mid-handshake state after a successful charge_start (and Tesla's own
+    // DetailedChargeStateStarting) — treat it as an active session so we
+    // do not leave the dash on Stopped while the car is already drawing.
+    const currentlyCharging =
+      vehicle.chargingState === "Charging" || vehicle.chargingState === "Starting";
 
     // The vehicle itself stops charging once it hits its own charge-limit
     // slider (charging_state -> "Complete") - without this check the
@@ -1043,9 +1098,15 @@ export class ChargeController extends EventEmitter {
     // Ramp amps down as the available surplus shrinks; only stop outright
     // once even the minimum charge rate isn't sustainable for a couple of
     // consecutive polls, rather than cutting straight to zero the moment
-    // the balance dips negative.
+    // the balance dips negative. While we are still confirming a start,
+    // chargerVoltage/current are often still 0, so surplus looks too low
+    // (house load already includes the car) — do not count that as a stop.
     if (ampsAvailable < config.minChargeAmps) {
-      this.belowStopThresholdCount += 1;
+      if (vehicle.chargingState === "Starting" || this.chargeStartConfirmPending) {
+        this.belowStopThresholdCount = 0;
+      } else {
+        this.belowStopThresholdCount += 1;
+      }
     } else {
       this.belowStopThresholdCount = 0;
     }
@@ -1107,6 +1168,7 @@ export class ChargeController extends EventEmitter {
   }
 
   private markChargingStopped(): void {
+    this.chargeStartConfirmPending = false;
     const stopped = (vehicle: VehicleChargeState): VehicleChargeState => ({
       ...vehicle,
       chargingState: "Stopped",
@@ -1118,6 +1180,22 @@ export class ChargeController extends EventEmitter {
   }
 
   /**
+   * Optimistic mirror of markChargingStopped after a successful charge_start.
+   * Keeps State off the pre-start Stopped snapshot until vehicle_data or
+   * telemetry confirms Charging (often several seconds later).
+   */
+  private markChargingStarting(): void {
+    const patch = (vehicle: VehicleChargeState): VehicleChargeState => ({
+      ...vehicle,
+      chargingState: "Starting",
+      timestamp: new Date(),
+    });
+    if (this.status.vehicle) this.status.vehicle = patch(this.status.vehicle);
+    if (this.lastPolledVehicle) this.lastPolledVehicle = patch(this.lastPolledVehicle);
+    else if (this.status.vehicle) this.lastPolledVehicle = this.status.vehicle;
+  }
+
+  /**
    * Last known state says the car is charging, and this surplus cannot
    * support the minimum amps. Count toward the same stop threshold the
    * live path uses, then send one stop. A stale Stopped car is ignored.
@@ -1126,6 +1204,18 @@ export class ChargeController extends EventEmitter {
     if (!this.status.override.enabled) return false;
     const last = this.status.vehicle;
     if (!last || (last.chargingState !== "Charging" && last.chargingState !== "Starting")) return false;
+    // Recent charge_start: keep decision=charging and do not stop off a
+    // Starting snapshot with 0 A — real draw is missing from the reading.
+    if (
+      this.chargeStartConfirmPending ||
+      last.chargingState === "Starting" ||
+      (this.lastStartCommandAt > 0 && Date.now() - this.lastStartCommandAt < config.tesla.telemetryRecoveryPollMs)
+    ) {
+      this.belowStopThresholdCount = 0;
+      this.status.decision = "charging";
+      this.status.statusNote = null;
+      return true;
+    }
     if (this.ampsAvailable(surplusW, last) >= config.minChargeAmps) {
       this.belowStopThresholdCount = 0;
       this.status.decision = "charging";
@@ -1174,7 +1264,7 @@ export class ChargeController extends EventEmitter {
   }
 
   private async applyCharge(amps: number, vehicle: VehicleChargeState | null): Promise<boolean> {
-    if (vehicle?.chargingState !== "Charging") {
+    if (vehicle?.chargingState !== "Charging" && vehicle?.chargingState !== "Starting") {
       const started = await this.sendStart();
       if (started === "blocked") {
         this.publishBlockStatus();
@@ -1182,8 +1272,11 @@ export class ChargeController extends EventEmitter {
       }
       if (started === "failed") return false;
       if (started === "held") {
+        // Start already went out recently — keep the optimistic Starting
+        // snapshot and treat the session as underway for this tick.
+        this.markChargingStarting();
+        this.chargeStartConfirmPending = true;
         this.status.statusNote = this.holdNote("Start already sent", this.lastStartCommandAt);
-        return false;
       }
     }
     const ampResult = await this.sendAmps(amps, vehicle?.chargeAmps ?? Number.NaN);
@@ -1201,6 +1294,12 @@ export class ChargeController extends EventEmitter {
     this.lastStartCommandAt = Date.now();
     try {
       await this.tesla.startCharging();
+      // Mirror markChargingStopped: patch display immediately, then try one
+      // vehicle_data confirm so State / volts / amps leave the pre-start
+      // Stopped snapshot even when fleet telemetry is silent.
+      this.markChargingStarting();
+      this.chargeStartConfirmPending = true;
+      await this.confirmChargeStartAfterCommand();
       return "sent";
     } catch (err) {
       this.observeTeslaError("charge_start", err);
@@ -1210,12 +1309,32 @@ export class ChargeController extends EventEmitter {
     }
   }
 
+  /**
+   * Best-effort vehicle_data right after charge_start. Failures leave
+   * chargeStartConfirmPending set so the next tick retries.
+   */
+  private async confirmChargeStartAfterCommand(): Promise<void> {
+    if (!this.armPaidCall()) return;
+    const polled = await this.pollDirect();
+    if (!polled) return;
+    if (polled.chargingState === "Charging" || polled.chargingState === "Starting") {
+      this.chargeStartConfirmPending = false;
+      this.status.vehicle = polled;
+      this.haveFreshControlState = true;
+      return;
+    }
+    // Tesla often still reports Stopped for a few seconds after accepting
+    // charge_start — keep Starting and confirm on a later tick.
+    this.markChargingStarting();
+  }
+
   private async sendStop(): Promise<"sent" | "held" | "blocked" | "failed"> {
     if (!this.armPaidCall()) return "blocked";
     if (!this.commandGapOpen(this.lastStopCommandAt)) return "held";
     this.lastStopCommandAt = Date.now();
     try {
       await this.tesla.stopCharging();
+      this.chargeStartConfirmPending = false;
       return "sent";
     } catch (err) {
       this.observeTeslaError("charge_stop", err);
