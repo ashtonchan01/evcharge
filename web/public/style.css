@@ -105,6 +105,7 @@ main {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .brand-icon {
@@ -127,6 +128,13 @@ main {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .conn {
@@ -391,18 +399,7 @@ dd { margin: 0; font-weight: 600; text-align: right; font-variant-numeric: tabul
 .solar-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.solar-hint {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.75rem;
-}
-
-.solar-hint:empty {
-  display: none;
+  gap: 8px;
 }
 
 .decision-pill {
@@ -658,6 +655,8 @@ label {
 #last-error { color: var(--bad); }
 
 @media (max-width: 480px) {
+  .brand-text h1 { font-size: 0.95rem; }
+  .top-actions { gap: 6px; }
   .flow-node { min-width: 72px; }
   .flow-line { max-width: 48px; }
 

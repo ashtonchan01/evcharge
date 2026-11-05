@@ -141,7 +141,14 @@ function decisionView(status) {
   };
 }
 
+function checksIdle(status) {
+  if (!status || !status.override || !status.override.enabled) return true;
+  const vehicle = status.vehicle;
+  return Boolean(vehicle && vehicle.pluggedIn === false);
+}
+
 function nextPollLabel() {
+  if (checksIdle(latestStatus)) return "";
   if (!nextPollAt) return "";
   const secsLeft = Math.round((nextPollAt - Date.now()) / 1000);
   if (secsLeft > 0) return `Next check in ${secsLeft}s`;
@@ -215,12 +222,14 @@ function render(status) {
   latestStatus = status;
   setText("last-error", status.lastError || "");
 
-  nextPollAt = status.lastPollAt ? new Date(status.lastPollAt).getTime() + status.pollIntervalMs : null;
+  nextPollAt =
+    !checksIdle(status) && status.lastPollAt
+      ? new Date(status.lastPollAt).getTime() + status.pollIntervalMs
+      : null;
   tickCountdown();
 
   $("enabled-toggle").checked = status.override.enabled;
   setText("enabled-label", status.override.enabled ? "On" : "Off");
-  setText("solar-hint", status.override.enabled ? "" : "Stops the car.");
 
   ensureVehicleOption(status.vehicleTag);
 

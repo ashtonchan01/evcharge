@@ -15,7 +15,7 @@
   <meta name="apple-mobile-web-app-title" content="EVCharge" />
   <meta name="mobile-web-app-capable" content="yes" />
 
-  <link rel="stylesheet" href="/style.css?v=20261105b" />
+  <link rel="stylesheet" href="/style.css?v=20261105c" />
 </head>
 <body>
   <div class="bg-fx" aria-hidden="true">
@@ -33,9 +33,18 @@
           <p class="subtitle">Live control</p>
         </div>
       </div>
-      <div class="conn">
-        <span id="conn-indicator" class="dot dot-off"></span>
-        <span id="conn-label" class="conn-label">Connecting…</span>
+      <div class="top-actions">
+        <div class="conn">
+          <span id="conn-indicator" class="dot dot-off"></span>
+          <span id="conn-label" class="conn-label">Connecting…</span>
+        </div>
+        <div class="solar-row">
+          <label class="switch">
+            <input type="checkbox" id="enabled-toggle" aria-label="Solar charging" />
+            <span class="slider"></span>
+          </label>
+          <span id="enabled-label">Off</span>
+        </div>
       </div>
     </header>
 
@@ -100,19 +109,11 @@
         <button type="submit">Set</button>
       </form>
       <p id="charge-limit-message"></p>
-      <div class="solar-row">
-        <label class="switch">
-          <input type="checkbox" id="enabled-toggle" />
-          <span class="slider"></span>
-        </label>
-        <span id="enabled-label">Off</span>
-        <span id="solar-hint" class="solar-hint">Off stops the car.</span>
-      </div>
       <p id="override-message"></p>
       <p id="last-error" class="error"></p>
     </section>
   </main>
 
-  <script src="/app.js?v=20261105b"></script>
+  <script src="/app.js?v=20261105c"></script>
 </body>
 </html>

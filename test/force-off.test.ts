@@ -165,4 +165,61 @@ describe("stale charge rate and force-off", () => {
     const { loadSolarEnabled } = await import("../src/controller/chargeSettings.ts");
     assert.equal(loadSolarEnabled(), true);
   });
+
+  it("keeps polling solar while off or unplugged, and skips Tesla until on and plugged", async () => {
+    useTempSettings();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    let snapshots = 0;
+    let chargeReads = 0;
+    const goodwe = {
+      async getSnapshot() {
+        snapshots += 1;
+        return solar(5000, 400);
+      },
+    };
+    const tesla = {
+      getVehicleTag: () => "5YJ3TESTVIN000001",
+      setVehicleTag() {},
+      async getChargeState() {
+        chargeReads += 1;
+        return chargingAt(0);
+      },
+      async wakeUp() {},
+      async startCharging() {},
+      async stopCharging() {},
+      async setChargeAmps() {},
+    };
+    const controller = new ChargeController(goodwe as never, tesla as never, null);
+    const internal = controller as unknown as {
+      tick(): Promise<void>;
+      status: { vehicle: ReturnType<typeof chargingAt> | null; override: { enabled: boolean } };
+      lastPolledVehicle: ReturnType<typeof chargingAt> | null;
+      explicitSession: boolean;
+      sessionProbePending: boolean;
+    };
+    const stopped = { ...chargingAt(0), chargingState: "Stopped", chargeAmps: 0, chargerActualCurrent: 0 };
+    internal.status.vehicle = stopped;
+    internal.lastPolledVehicle = stopped;
+    internal.status.override.enabled = false;
+    internal.explicitSession = false;
+    internal.sessionProbePending = false;
+
+    await internal.tick();
+    assert.equal(snapshots, 1);
+    assert.equal(chargeReads, 0);
+    assert.equal(controller.getStatus().surplusW, 4600);
+
+    internal.status.override.enabled = true;
+    internal.status.vehicle = { ...stopped, pluggedIn: false };
+    internal.lastPolledVehicle = internal.status.vehicle;
+    await internal.tick();
+    assert.equal(snapshots, 2);
+    assert.equal(chargeReads, 0);
+
+    internal.status.vehicle = chargingAt(5);
+    internal.lastPolledVehicle = internal.status.vehicle;
+    await internal.tick();
+    assert.equal(snapshots, 3);
+    assert.equal(chargeReads, 1);
+  });
 });
