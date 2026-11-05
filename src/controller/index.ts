@@ -431,17 +431,27 @@ export class ChargeController extends EventEmitter {
     this.emit("update", this.status);
   }
 
+  /**
+   * Off, or the last snapshot says the car is unplugged: keep polling
+   * SEMS, but do not call Tesla or run charge decisions. Turning solar
+   * on clears this (session probe) so a plugged-in car resumes control.
+   * Turning it off still gets one stop from the last known snapshot,
+   * without a vehicle_data read.
+   */
+  private skipVehicleControl(): boolean {
+    if (this.sessionProbePending) return false;
+    if (!this.status.override.enabled) return true;
+    const vehicle = this.status.vehicle ?? this.lastPolledVehicle;
+    return Boolean(vehicle && !vehicle.pluggedIn);
+  }
+
   private async tick(): Promise<void> {
     if (this.tickInFlight) return;
     this.tickInFlight = true;
     try {
-      const [solar, vehicle] = await Promise.all([this.goodwe.getSnapshot(), this.resolveVehicleState()]);
+      const solar = await this.goodwe.getSnapshot();
 
       this.status.solar = solar;
-      // Keep the last known charge snapshot on screen when this cycle
-      // couldn't reach the car, so the picker and "Stopped / plugged in"
-      // don't flash blank. decide() is still given null in that case.
-      this.status.vehicle = vehicle ?? this.lastPolledVehicle;
       this.status.lastPollAt = new Date();
       this.status.lastError = null;
 
@@ -461,8 +471,23 @@ export class ChargeController extends EventEmitter {
       const surplusW = solar.pvPowerW - solar.loadPowerW;
       this.status.surplusW = surplusW;
 
-      const controlVehicle = this.haveFreshControlState ? (vehicle ?? this.lastPolledVehicle) : null;
-      await this.decide(surplusW, controlVehicle, solarStale);
+      if (this.skipVehicleControl()) {
+        // Last known car state stays on screen. Solar watts above still move.
+        if (this.explicitSession && !this.status.override.enabled) {
+          await this.holdChargeOff(this.status.vehicle ?? this.lastPolledVehicle);
+        } else {
+          this.status.decision = "idle";
+          this.status.targetAmps = null;
+        }
+      } else {
+        const vehicle = await this.resolveVehicleState();
+        // Keep the last known charge snapshot on screen when this cycle
+        // couldn't reach the car, so the picker and "Stopped / plugged in"
+        // don't flash blank. decide() is still given null in that case.
+        this.status.vehicle = vehicle ?? this.lastPolledVehicle;
+        const controlVehicle = this.haveFreshControlState ? (vehicle ?? this.lastPolledVehicle) : null;
+        await this.decide(surplusW, controlVehicle, solarStale);
+      }
     } catch (err) {
       this.status.lastError = err instanceof Error ? err.message : String(err);
       this.status.decision = "unavailable";
