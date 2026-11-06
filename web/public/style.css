@@ -88,7 +88,8 @@ main {
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  /* Same card-to-card gap as the mobile layout (flow, status pill, vehicle). */
+  gap: 12px;
   padding: calc(12px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
     calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));
 }
