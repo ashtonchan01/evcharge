@@ -224,6 +224,7 @@ describe("stale charge rate and force-off", () => {
     const { ChargeController } = await import("../src/controller/index.ts");
     const { config } = await import("../src/config.ts");
     assert.equal(config.stableCyclesToStop, 1);
+    assert.equal(config.pollIntervalMs, 60_000);
 
     const vins = ["5YJ3F7EA5KF461091", "5YJXDCE25JF080915"];
     for (const vin of vins) {
@@ -280,6 +281,7 @@ describe("stale charge rate and force-off", () => {
 
       await internal.tick();
       assert.equal(internal.status.vehicleTag, vin);
+      assert.equal(controller.getStatus().pollIntervalMs, 60_000);
       assert.deepEqual(stops, [vin]);
       assert.equal(polls, 0);
       assert.equal(controller.getStatus().targetAmps, null);

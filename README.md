@@ -328,6 +328,14 @@ billing period opens.
 
 All thresholds live in `.env`:
 
+- `POLL_INTERVAL_MS` — control-loop period, default **60000** (60 seconds)
+  for both vehicles. `STABLE_CYCLES_TO_START` / `STABLE_CYCLES_TO_STOP`
+  count these ticks, so a one-tick stop is one minute. The dashboard
+  "Next check in Ns" countdown uses the same `pollIntervalMs` from
+  `GET /api/status`. Off and unplugged still skip Tesla and show no
+  countdown. The running host has `POLL_INTERVAL_MS=30000`, which keeps
+  a 30 second loop until that line is set to `60000` and evcharge is
+  restarted.
 - `MIN_SURPLUS_START_W` / `MIN_SURPLUS_STOP_W` — hysteresis band so surplus
   hovering near zero doesn't start/stop every cycle.
 - `STABLE_CYCLES_TO_START` / `STABLE_CYCLES_TO_STOP` — how many

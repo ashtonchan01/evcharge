@@ -11,7 +11,10 @@ const schema = z.object({
   PORT: numeric().default("3000"),
   LOG_LEVEL: z.string().default("info"),
 
-  POLL_INTERVAL_MS: numeric().default("30000"),
+  // One control tick. Start/stop stable cycles are counted in ticks, so
+  // the default one-tick stop is one minute. A VM .env value overrides this
+  // (the live host has used 30000).
+  POLL_INTERVAL_MS: numeric().default("60000"),
   MIN_SURPLUS_START_W: numeric().default("1200"),
   CHARGER_VOLTAGE: numeric().default("240"),
   CHARGER_PHASES: numeric().default("1"),
