@@ -432,17 +432,34 @@ export class ChargeController extends EventEmitter {
   }
 
   /**
-   * Off, or the last snapshot says the car is unplugged: keep polling
-   * SEMS, but do not call Tesla or run charge decisions. Turning solar
-   * on clears this (session probe) so a plugged-in car resumes control.
-   * Turning it off still gets one stop from the last known snapshot,
-   * without a vehicle_data read.
+   * Off, or a fresh successful read says the car is unplugged: keep
+   * polling SEMS, but do not call Tesla or run charge decisions. An old
+   * snapshot is not that reading — while the switch stays On, the normal
+   * recovery gap polls again so a later plug-in is seen. A failed/asleep
+   * vehicle_data does not refresh the snapshot and must not lock the skip
+   * either. Turning solar on still forces one immediate probe. Turning
+   * it off still gets one stop from the last known snapshot, without a
+   * vehicle_data read.
    */
   private skipVehicleControl(): boolean {
     if (this.sessionProbePending) return false;
     if (!this.status.override.enabled) return true;
+    return this.freshUnpluggedSnapshot();
+  }
+
+  /**
+   * True only when the latest successful charge snapshot is recent and
+   * unplugged. The window matches the recovery gap, so a restart (which
+   * zeroes the in-memory poll clock) does not immediately re-poll a
+   * reading we already trust, and a stale one is not treated as final.
+   */
+  private freshUnpluggedSnapshot(): boolean {
+    // A miss increments this and leaves the previous snapshot in place.
+    // That old pluggedIn:false is not a new confirmation.
+    if (this.consecutiveFailures > 0) return false;
     const vehicle = this.status.vehicle ?? this.lastPolledVehicle;
-    return Boolean(vehicle && !vehicle.pluggedIn);
+    if (!vehicle || vehicle.pluggedIn) return false;
+    return this.snapshotIsCurrent(vehicle);
   }
 
   private async tick(): Promise<void> {
@@ -853,7 +870,16 @@ export class ChargeController extends EventEmitter {
     // The read failed for a non-hold reason (typically asleep). A user
     // enable gets that wake immediately. Automatic retries still wait out
     // the recovery gap, and a 403/429 never wakes.
-    if (!this.suppressWake && !this.recentlyAwake() && (userInitiated || this.wakeGapElapsed())) {
+    //
+    // Rechecking a car last known unplugged only needs vehicle_data on
+    // that gap — enough to notice it come online. Waking on every miss
+    // would bill wake_up for as long as the switch stays On and the car
+    // stays asleep. Wake once if this process has not woken yet; the
+    // user's On tap still wakes via userInitiated.
+    const known = this.status.vehicle ?? this.lastPolledVehicle;
+    const unpluggedRecheck = Boolean(known && !known.pluggedIn);
+    const automaticWake = unpluggedRecheck ? this.lastWakeAttemptAt <= 0 : this.wakeGapElapsed();
+    if (!this.suppressWake && !this.recentlyAwake() && (userInitiated || automaticWake)) {
       await this.wakeOnce();
       if (Date.now() < this.rateLimitedUntil || Date.now() < this.authPausedUntil || this.budgetHoldActive()) {
         this.haveFreshControlState = false;
