@@ -66,7 +66,9 @@ export function commandGapElapsed(now: number, lastAt: number, minIntervalMs: nu
 export function ampSendGapOpen(input: {
   now: number;
   lastAmpCommandAt: number;
+  lastAmpAcceptedAt: number;
   commandMinIntervalMs: number;
+  ampChangeMinIntervalMs: number;
   commandFailureBackoffMs: number;
   targetAmps: number;
   lastCommandedAmps: number | null;
@@ -81,7 +83,7 @@ export function ampSendGapOpen(input: {
   if (!input.lastAmpAttemptSucceeded && input.lastAmpCommandAt > 0) {
     return commandGapElapsed(input.now, input.lastAmpCommandAt, input.commandFailureBackoffMs);
   }
-  return true;
+  return commandGapElapsed(input.now, input.lastAmpAcceptedAt, input.ampChangeMinIntervalMs);
 }
 
 export function startStopSendGapOpen(input: {

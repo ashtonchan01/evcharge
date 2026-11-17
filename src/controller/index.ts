@@ -118,6 +118,8 @@ export class ChargeController extends EventEmitter {
   private lastStartCommandAt = 0;
   private lastStopCommandAt = 0;
   private lastAmpCommandAt = 0;
+  /** Timestamp of the last set_charging_amps Tesla accepted (success only). */
+  private lastAmpAcceptedAt = 0;
   private lastStartAttemptSucceeded = true;
   private lastStopAttemptSucceeded = true;
   private lastAmpAttemptSucceeded = true;
@@ -377,6 +379,7 @@ export class ChargeController extends EventEmitter {
     this.haveFreshControlState = false;
     this.consecutiveFailures = 0;
     this.lastCommandedAmps = null;
+    this.lastAmpAcceptedAt = 0;
     // Drop the previous car's charge snapshot from the holds file so a
     // restart cannot paint the new VIN with the old car's battery/%.
     this.persistHolds();
@@ -1432,7 +1435,9 @@ export class ChargeController extends EventEmitter {
       !ampSendGapOpen({
         now: Date.now(),
         lastAmpCommandAt: this.lastAmpCommandAt,
+        lastAmpAcceptedAt: this.lastAmpAcceptedAt,
         commandMinIntervalMs: config.tesla.commandMinIntervalMs,
+        ampChangeMinIntervalMs: config.tesla.ampChangeMinIntervalMs,
         commandFailureBackoffMs: config.tesla.commandFailureBackoffMs,
         targetAmps,
         lastCommandedAmps: this.lastCommandedAmps,
@@ -1446,7 +1451,9 @@ export class ChargeController extends EventEmitter {
     const rounded = Math.round(targetAmps);
     try {
       await this.tesla.setChargeAmps(rounded);
-      this.lastAmpCommandAt = Date.now();
+      const acceptedAt = Date.now();
+      this.lastAmpCommandAt = acceptedAt;
+      this.lastAmpAcceptedAt = acceptedAt;
       this.lastAmpAttemptSucceeded = true;
       this.lastCommandedAmps = rounded;
       if (this.status.vehicle) this.status.vehicle = { ...this.status.vehicle, chargeAmps: rounded };
