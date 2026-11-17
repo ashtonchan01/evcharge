@@ -98,9 +98,11 @@ const schema = z.object({
   TESLA_AUTH_FAILURE_COOLDOWN_MS: numeric().default("120000"),
   // Minimum gap between repeated charge_start / charge_stop, and between
   // set_charging_amps when the integer target matches the last amps Tesla
-  // accepted (reported amps may still lag). A new amp target while charging
-  // is not subject to this interval.
+  // accepted (reported amps may still lag).
   TESLA_COMMAND_MIN_INTERVAL_MS: numeric().default("300000"),
+  // Minimum gap between set_charging_amps calls when the integer target
+  // differs from the last amps Tesla accepted (measured from that acceptance).
+  TESLA_AMP_CHANGE_MIN_INTERVAL_MS: numeric().default("60000"),
   // After a failed start/stop/amp command, wait this long before retrying
   // (success-path identical repeats use TESLA_COMMAND_MIN_INTERVAL_MS).
   TESLA_COMMAND_FAILURE_BACKOFF_MS: numeric().default("45000"),
@@ -186,6 +188,7 @@ export const config = {
     transientRateLimitCooldownMs: env.TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS!,
     authFailureCooldownMs: env.TESLA_AUTH_FAILURE_COOLDOWN_MS!,
     commandMinIntervalMs: env.TESLA_COMMAND_MIN_INTERVAL_MS!,
+    ampChangeMinIntervalMs: env.TESLA_AMP_CHANGE_MIN_INTERVAL_MS!,
     commandFailureBackoffMs: env.TESLA_COMMAND_FAILURE_BACKOFF_MS!,
     apiBudgetMode: env.TESLA_API_BUDGET_MODE,
     apiBudgetCooldownMs: env.TESLA_API_BUDGET_COOLDOWN_MS!,

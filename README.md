@@ -223,9 +223,10 @@ are not. As of the October 2026 bill the $16 monthly discount was used up
 - Sends `charge_start`, `charge_stop`, and `set_charging_amps` only when
   the integer amp target or the start/stop request actually differs from
   what the car already reports. Start/stop and identical amp repeats (same
-  target Tesla already accepted) respect `TESLA_COMMAND_MIN_INTERVAL_MS`;
-  a new amp target while charging is sent on the next tick. Failed commands
-  retry after `TESLA_COMMAND_FAILURE_BACKOFF_MS`.
+  target Tesla already accepted) respect `TESLA_COMMAND_MIN_INTERVAL_MS`.
+  A new amp target while charging may be sent at most once per
+  `TESLA_AMP_CHANGE_MIN_INTERVAL_MS` (from the last accepted command).
+  Failed commands retry after `TESLA_COMMAND_FAILURE_BACKOFF_MS`.
 - On a non-billing HTTP 403, pauses **all** Tesla calls for
   `TESLA_RATE_LIMIT_COOLDOWN_MS` (30 minutes). A plain 429 pauses for
   `TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS` (5 minutes). Neither window is

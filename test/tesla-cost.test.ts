@@ -28,6 +28,7 @@ import {
 const FIVE_MIN = 300_000;
 const THIRTY_MIN = 1_800_000;
 const FAILURE_BACKOFF = 45_000;
+const AMP_CHANGE_GAP = 60_000;
 
 function useFreshHoldsFile(): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "evcharge-holds-"));
@@ -75,27 +76,28 @@ describe("amp commands", () => {
     assert.equal(commandGapElapsed(10_000, 0, FIVE_MIN), true);
   });
 
-  it("opens the amp gap for a new target immediately after a different accepted amps", () => {
+  it("throttles a new amp target until TESLA_AMP_CHANGE_MIN_INTERVAL_MS from last acceptance", () => {
     const base = {
       commandMinIntervalMs: FIVE_MIN,
+      ampChangeMinIntervalMs: AMP_CHANGE_GAP,
       commandFailureBackoffMs: FAILURE_BACKOFF,
       lastCommandedAmps: 12,
       lastAmpAttemptSucceeded: true,
       sessionBundleOpen: false,
       explicitSession: false,
+      lastAmpCommandAt: 19_000,
+      lastAmpAcceptedAt: 19_000,
     };
     assert.equal(ampCommandIsIdenticalRepeat(12, 12), true);
     assert.equal(ampCommandIsIdenticalRepeat(14, 12), false);
+    assert.equal(ampSendGapOpen({ ...base, now: 20_000, targetAmps: 14 }), false);
     assert.equal(
-      ampSendGapOpen({ ...base, now: 20_000, lastAmpCommandAt: 19_000, targetAmps: 14 }),
+      ampSendGapOpen({ ...base, now: 19_000 + AMP_CHANGE_GAP, targetAmps: 14 }),
       true
     );
+    assert.equal(ampSendGapOpen({ ...base, now: 20_000, targetAmps: 12 }), false);
     assert.equal(
-      ampSendGapOpen({ ...base, now: 20_000, lastAmpCommandAt: 19_000, targetAmps: 12 }),
-      false
-    );
-    assert.equal(
-      ampSendGapOpen({ ...base, now: 19_000 + FIVE_MIN, lastAmpCommandAt: 19_000, targetAmps: 12 }),
+      ampSendGapOpen({ ...base, now: 19_000 + FIVE_MIN, targetAmps: 12 }),
       true
     );
   });
@@ -103,12 +105,14 @@ describe("amp commands", () => {
   it("uses a short backoff after a failed amp command", () => {
     const base = {
       commandMinIntervalMs: FIVE_MIN,
+      ampChangeMinIntervalMs: AMP_CHANGE_GAP,
       commandFailureBackoffMs: FAILURE_BACKOFF,
       lastCommandedAmps: 10,
       lastAmpAttemptSucceeded: false,
       sessionBundleOpen: false,
       explicitSession: false,
       lastAmpCommandAt: 100_000,
+      lastAmpAcceptedAt: 50_000,
     };
     assert.equal(ampSendGapOpen({ ...base, now: 120_000, targetAmps: 14 }), false);
     assert.equal(ampSendGapOpen({ ...base, now: 100_000 + FAILURE_BACKOFF, targetAmps: 14 }), true);
@@ -258,12 +262,15 @@ describe("amp command send timing", () => {
     const internal = controller as unknown as {
       sendAmps(target: number, reported: number): Promise<string>;
       lastAmpCommandAt: number;
+      lastAmpAcceptedAt: number;
     };
 
     assert.equal(await internal.sendAmps(12, 5), "failed");
     assert.equal(await internal.sendAmps(12, 5), "held");
     internal.lastAmpCommandAt = Date.now() - FAILURE_BACKOFF - 1_000;
     assert.equal(await internal.sendAmps(12, 5), "sent");
+    assert.equal(await internal.sendAmps(16, 5), "held");
+    internal.lastAmpAcceptedAt = Date.now() - AMP_CHANGE_GAP - 1_000;
     assert.equal(await internal.sendAmps(16, 5), "sent");
     assert.deepEqual(amps, [12, 16]);
   });
@@ -333,6 +340,7 @@ describe("charge command dedup and cooldowns", () => {
       sendStop(): Promise<string>;
       sendAmps(target: number, reported: number): Promise<string>;
       chargeStartConfirmPending: boolean;
+      lastAmpAcceptedAt: number;
     };
 
     controller.setEnabled(true, "test");
@@ -363,6 +371,8 @@ describe("charge command dedup and cooldowns", () => {
     assert.equal(await internal.sendAmps(5, 5), "unchanged");
     assert.equal(await internal.sendAmps(12, 5), "sent");
     assert.equal(await internal.sendAmps(12, 5), "held");
+    assert.equal(await internal.sendAmps(14, 5), "held");
+    internal.lastAmpAcceptedAt = Date.now() - AMP_CHANGE_GAP - 1_000;
     assert.equal(await internal.sendAmps(14, 5), "sent");
     assert.deepEqual(amps, [12, 14]);
 
