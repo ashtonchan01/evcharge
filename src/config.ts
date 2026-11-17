@@ -96,12 +96,14 @@ const schema = z.object({
   // Akamai/HTML "Access Denied" on the token endpoint. Short, persisted,
   // and labeled as auth — not the 30-minute vehicle rate-limit hold.
   TESLA_AUTH_FAILURE_COOLDOWN_MS: numeric().default("120000"),
-  // Minimum gap between repeated charge_start / charge_stop / set_charging_amps
-  // calls. The control loop used to send those every poll while the car's
-  // reported state lagged, which is most of the Oct 2026 command bill.
-  // A command still goes out immediately when the integer amp target or the
-  // start/stop request is actually new.
+  // Minimum gap between repeated charge_start / charge_stop, and between
+  // set_charging_amps when the integer target matches the last amps Tesla
+  // accepted (reported amps may still lag). A new amp target while charging
+  // is not subject to this interval.
   TESLA_COMMAND_MIN_INTERVAL_MS: numeric().default("300000"),
+  // After a failed start/stop/amp command, wait this long before retrying
+  // (success-path identical repeats use TESLA_COMMAND_MIN_INTERVAL_MS).
+  TESLA_COMMAND_FAILURE_BACKOFF_MS: numeric().default("45000"),
   // auto: normal telemetry control until Tesla reports a billing cap, then
   // pause paid calls for TESLA_API_BUDGET_COOLDOWN_MS. on: pause immediately
   // (use this for the rest of a month that's already over the $16 Fleet API
@@ -184,6 +186,7 @@ export const config = {
     transientRateLimitCooldownMs: env.TESLA_TRANSIENT_RATE_LIMIT_COOLDOWN_MS!,
     authFailureCooldownMs: env.TESLA_AUTH_FAILURE_COOLDOWN_MS!,
     commandMinIntervalMs: env.TESLA_COMMAND_MIN_INTERVAL_MS!,
+    commandFailureBackoffMs: env.TESLA_COMMAND_FAILURE_BACKOFF_MS!,
     apiBudgetMode: env.TESLA_API_BUDGET_MODE,
     apiBudgetCooldownMs: env.TESLA_API_BUDGET_COOLDOWN_MS!,
     quietHoursStart: env.QUIET_HOURS_START || undefined,

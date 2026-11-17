@@ -6,12 +6,13 @@ import { TelemetryHint, TelemetryIngest } from "../tesla/telemetry.js";
 import { logger } from "../util/logger.js";
 import {
   ampCommandNeeded,
+  ampSendGapOpen,
   budgetBlocksPaidCalls,
   chargeSnapshotIsAwake,
   classifyTeslaBlock,
-  commandGapElapsed,
   planRecovery,
   RecoveryPlan,
+  startStopSendGapOpen,
   TeslaWait,
 } from "./teslaRecovery.js";
 import { loadActiveVehicleTag, loadSolarEnabled, saveActiveVehicleTag, saveSolarEnabled } from "./chargeSettings.js";
@@ -117,6 +118,9 @@ export class ChargeController extends EventEmitter {
   private lastStartCommandAt = 0;
   private lastStopCommandAt = 0;
   private lastAmpCommandAt = 0;
+  private lastStartAttemptSucceeded = true;
+  private lastStopAttemptSucceeded = true;
+  private lastAmpAttemptSucceeded = true;
   private lastCommandedAmps: number | null = null;
   /**
    * charge_start was accepted but vehicle_data / telemetry has not yet
@@ -1299,13 +1303,6 @@ export class ChargeController extends EventEmitter {
 
   private explicitSession = false;
 
-  private commandGapOpen(lastAt: number): boolean {
-    // The tick the user turned solar on may send the one start/stop/amp
-    // bundle even if a previous attempt was recent. Every later tick waits.
-    if (this.explicitSession || this.sessionBundleOpen) return true;
-    return commandGapElapsed(Date.now(), lastAt, config.tesla.commandMinIntervalMs);
-  }
-
   private holdNote(prefix: string, lastAt: number): string {
     const leftMs = Math.max(0, lastAt + config.tesla.commandMinIntervalMs - Date.now());
     const secs = Math.round(leftMs / 1000);
@@ -1341,10 +1338,23 @@ export class ChargeController extends EventEmitter {
 
   private async sendStart(): Promise<"sent" | "held" | "blocked" | "failed"> {
     if (!this.armPaidCall()) return "blocked";
-    if (!this.commandGapOpen(this.lastStartCommandAt)) return "held";
-    this.lastStartCommandAt = Date.now();
+    if (
+      !startStopSendGapOpen({
+        now: Date.now(),
+        lastCommandAt: this.lastStartCommandAt,
+        commandMinIntervalMs: config.tesla.commandMinIntervalMs,
+        commandFailureBackoffMs: config.tesla.commandFailureBackoffMs,
+        lastAttemptSucceeded: this.lastStartAttemptSucceeded,
+        sessionBundleOpen: this.sessionBundleOpen,
+        explicitSession: this.explicitSession,
+      })
+    ) {
+      return "held";
+    }
     try {
       await this.tesla.startCharging();
+      this.lastStartCommandAt = Date.now();
+      this.lastStartAttemptSucceeded = true;
       // Mirror markChargingStopped: patch display immediately, then try one
       // vehicle_data confirm so State / volts / amps leave the pre-start
       // Stopped snapshot even when fleet telemetry is silent.
@@ -1353,6 +1363,8 @@ export class ChargeController extends EventEmitter {
       await this.confirmChargeStartAfterCommand();
       return "sent";
     } catch (err) {
+      this.lastStartCommandAt = Date.now();
+      this.lastStartAttemptSucceeded = false;
       this.observeTeslaError("charge_start", err);
       log.warn({ err: String(err) }, "applyCharge failed");
       this.status.lastError = `Failed to start charging: ${err instanceof Error ? err.message : String(err)}`;
@@ -1381,13 +1393,28 @@ export class ChargeController extends EventEmitter {
 
   private async sendStop(): Promise<"sent" | "held" | "blocked" | "failed"> {
     if (!this.armPaidCall()) return "blocked";
-    if (!this.commandGapOpen(this.lastStopCommandAt)) return "held";
-    this.lastStopCommandAt = Date.now();
+    if (
+      !startStopSendGapOpen({
+        now: Date.now(),
+        lastCommandAt: this.lastStopCommandAt,
+        commandMinIntervalMs: config.tesla.commandMinIntervalMs,
+        commandFailureBackoffMs: config.tesla.commandFailureBackoffMs,
+        lastAttemptSucceeded: this.lastStopAttemptSucceeded,
+        sessionBundleOpen: this.sessionBundleOpen,
+        explicitSession: this.explicitSession,
+      })
+    ) {
+      return "held";
+    }
     try {
       await this.tesla.stopCharging();
+      this.lastStopCommandAt = Date.now();
+      this.lastStopAttemptSucceeded = true;
       this.chargeStartConfirmPending = false;
       return "sent";
     } catch (err) {
+      this.lastStopCommandAt = Date.now();
+      this.lastStopAttemptSucceeded = false;
       this.observeTeslaError("charge_stop", err);
       log.warn({ err: String(err) }, "stop failed");
       this.status.lastError = `Failed to stop charging: ${err instanceof Error ? err.message : String(err)}`;
@@ -1401,18 +1428,33 @@ export class ChargeController extends EventEmitter {
   ): Promise<"sent" | "unchanged" | "held" | "blocked" | "failed"> {
     if (!ampCommandNeeded(targetAmps, reportedAmps, this.lastCommandedAmps)) return "unchanged";
     if (!this.armPaidCall()) return "blocked";
-    if (!this.commandGapOpen(this.lastAmpCommandAt)) return "held";
+    if (
+      !ampSendGapOpen({
+        now: Date.now(),
+        lastAmpCommandAt: this.lastAmpCommandAt,
+        commandMinIntervalMs: config.tesla.commandMinIntervalMs,
+        commandFailureBackoffMs: config.tesla.commandFailureBackoffMs,
+        targetAmps,
+        lastCommandedAmps: this.lastCommandedAmps,
+        lastAmpAttemptSucceeded: this.lastAmpAttemptSucceeded,
+        sessionBundleOpen: this.sessionBundleOpen,
+        explicitSession: this.explicitSession,
+      })
+    ) {
+      return "held";
+    }
     const rounded = Math.round(targetAmps);
-    this.lastAmpCommandAt = Date.now();
     try {
       await this.tesla.setChargeAmps(rounded);
-      // Only remember a command Tesla accepted. A failure must stay eligible
-      // for one retry after the gap — marking it commanded would skip that forever.
+      this.lastAmpCommandAt = Date.now();
+      this.lastAmpAttemptSucceeded = true;
       this.lastCommandedAmps = rounded;
       if (this.status.vehicle) this.status.vehicle = { ...this.status.vehicle, chargeAmps: rounded };
       if (this.lastPolledVehicle) this.lastPolledVehicle = { ...this.lastPolledVehicle, chargeAmps: rounded };
       return "sent";
     } catch (err) {
+      this.lastAmpCommandAt = Date.now();
+      this.lastAmpAttemptSucceeded = false;
       this.observeTeslaError("set_charging_amps", err);
       log.warn({ err: String(err) }, "amps failed");
       this.status.lastError = `Failed to adjust charge amps: ${err instanceof Error ? err.message : String(err)}`;

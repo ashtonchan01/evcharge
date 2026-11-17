@@ -15,7 +15,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AddressInfo } from "node:net";
 import {
+  ampCommandIsIdenticalRepeat,
   ampCommandNeeded,
+  ampSendGapOpen,
   budgetBlocksPaidCalls,
   chargeSnapshotIsAwake,
   classifyTeslaBlock,
@@ -25,6 +27,7 @@ import {
 
 const FIVE_MIN = 300_000;
 const THIRTY_MIN = 1_800_000;
+const FAILURE_BACKOFF = 45_000;
 
 function useFreshHoldsFile(): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "evcharge-holds-"));
@@ -54,15 +57,15 @@ describe("classifyTeslaBlock", () => {
 });
 
 describe("amp commands", () => {
-  it("does not send set_charging_amps when the integer target already matches", () => {
+  it("does not send set_charging_amps when the integer target already matches reported amps", () => {
     assert.equal(ampCommandNeeded(7, 7, null), false);
     assert.equal(ampCommandNeeded(7.2, 7, null), false);
     assert.equal(ampCommandNeeded(8, 8.4, 5), false);
-    assert.equal(ampCommandNeeded(10, 32, 10), false);
   });
 
-  it("sends only when the target differs from both the car and the last command", () => {
-    assert.equal(ampCommandNeeded(12, 5, 5), true);
+  it("sends when reported amps lag, even if the target matches a prior accepted command", () => {
+    assert.equal(ampCommandNeeded(10, 32, 10), true);
+    assert.equal(ampCommandNeeded(12, 5, 12), true);
     assert.equal(ampCommandNeeded(12, 5, null), true);
   });
 
@@ -70,6 +73,45 @@ describe("amp commands", () => {
     assert.equal(commandGapElapsed(10_000, 9_000, FIVE_MIN), false);
     assert.equal(commandGapElapsed(10_000 + FIVE_MIN, 10_000, FIVE_MIN), true);
     assert.equal(commandGapElapsed(10_000, 0, FIVE_MIN), true);
+  });
+
+  it("opens the amp gap for a new target immediately after a different accepted amps", () => {
+    const base = {
+      commandMinIntervalMs: FIVE_MIN,
+      commandFailureBackoffMs: FAILURE_BACKOFF,
+      lastCommandedAmps: 12,
+      lastAmpAttemptSucceeded: true,
+      sessionBundleOpen: false,
+      explicitSession: false,
+    };
+    assert.equal(ampCommandIsIdenticalRepeat(12, 12), true);
+    assert.equal(ampCommandIsIdenticalRepeat(14, 12), false);
+    assert.equal(
+      ampSendGapOpen({ ...base, now: 20_000, lastAmpCommandAt: 19_000, targetAmps: 14 }),
+      true
+    );
+    assert.equal(
+      ampSendGapOpen({ ...base, now: 20_000, lastAmpCommandAt: 19_000, targetAmps: 12 }),
+      false
+    );
+    assert.equal(
+      ampSendGapOpen({ ...base, now: 19_000 + FIVE_MIN, lastAmpCommandAt: 19_000, targetAmps: 12 }),
+      true
+    );
+  });
+
+  it("uses a short backoff after a failed amp command", () => {
+    const base = {
+      commandMinIntervalMs: FIVE_MIN,
+      commandFailureBackoffMs: FAILURE_BACKOFF,
+      lastCommandedAmps: 10,
+      lastAmpAttemptSucceeded: false,
+      sessionBundleOpen: false,
+      explicitSession: false,
+      lastAmpCommandAt: 100_000,
+    };
+    assert.equal(ampSendGapOpen({ ...base, now: 120_000, targetAmps: 14 }), false);
+    assert.equal(ampSendGapOpen({ ...base, now: 100_000 + FAILURE_BACKOFF, targetAmps: 14 }), true);
   });
 });
 
@@ -178,6 +220,55 @@ describe("budgetBlocksPaidCalls", () => {
   });
 });
 
+describe("amp command send timing", () => {
+  it("retries after failure backoff and does not block a new target", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+
+    const amps: number[] = [];
+    let failNext = true;
+    const tesla = {
+      getVehicleTag: () => "5YJ3TESTVIN000001",
+      setVehicleTag() {},
+      async getChargeState() {
+        return {
+          chargingState: "Charging",
+          chargeAmps: 5,
+          chargeLimitSoc: 80,
+          batteryLevel: 50,
+          chargerVoltage: 240,
+          chargerActualCurrent: 5,
+          pluggedIn: true,
+          timestamp: new Date(),
+        };
+      },
+      async wakeUp() {},
+      async startCharging() {},
+      async stopCharging() {},
+      async setChargeAmps(value: number) {
+        if (failNext) {
+          failNext = false;
+          throw new Error("vehicle unavailable");
+        }
+        amps.push(value);
+      },
+    };
+
+    const controller = new ChargeController({} as never, tesla as never, null);
+    const internal = controller as unknown as {
+      sendAmps(target: number, reported: number): Promise<string>;
+      lastAmpCommandAt: number;
+    };
+
+    assert.equal(await internal.sendAmps(12, 5), "failed");
+    assert.equal(await internal.sendAmps(12, 5), "held");
+    internal.lastAmpCommandAt = Date.now() - FAILURE_BACKOFF - 1_000;
+    assert.equal(await internal.sendAmps(12, 5), "sent");
+    assert.equal(await internal.sendAmps(16, 5), "sent");
+    assert.deepEqual(amps, [12, 16]);
+  });
+});
+
 describe("charge command dedup and cooldowns", () => {
   it("sends start and set_amps once, keeps the 30 minute 403 cooldown, and opens a billing hold", async () => {
     useFreshHoldsFile();
@@ -271,9 +362,9 @@ describe("charge command dedup and cooldowns", () => {
 
     assert.equal(await internal.sendAmps(5, 5), "unchanged");
     assert.equal(await internal.sendAmps(12, 5), "sent");
-    assert.equal(await internal.sendAmps(12, 5), "unchanged");
-    assert.equal(await internal.sendAmps(14, 5), "held");
-    assert.deepEqual(amps, [12]);
+    assert.equal(await internal.sendAmps(12, 5), "held");
+    assert.equal(await internal.sendAmps(14, 5), "sent");
+    assert.deepEqual(amps, [12, 14]);
 
     assert.equal(await internal.sendStop(), "sent");
     assert.equal(await internal.sendStop(), "held");

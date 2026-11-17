@@ -41,19 +41,61 @@ export function classifyTeslaBlock(status: number, message: string): TeslaBlock 
 }
 
 /** True when a set_charging_amps call would change something Tesla doesn't already have. */
-export function ampCommandNeeded(targetAmps: number, reportedAmps: number, lastCommandedAmps: number | null): boolean {
+export function ampCommandNeeded(
+  targetAmps: number,
+  reportedAmps: number,
+  _lastCommandedAmps: number | null
+): boolean {
   if (!Number.isFinite(targetAmps)) return false;
   const target = Math.round(targetAmps);
   if (Number.isFinite(reportedAmps) && target === Math.round(reportedAmps)) return false;
-  if (lastCommandedAmps !== null && Number.isFinite(lastCommandedAmps) && target === Math.round(lastCommandedAmps)) {
-    return false;
-  }
   return true;
+}
+
+/** Same integer target as the last amps Tesla accepted — throttle at commandMinIntervalMs. */
+export function ampCommandIsIdenticalRepeat(targetAmps: number, lastCommandedAmps: number | null): boolean {
+  if (lastCommandedAmps === null || !Number.isFinite(lastCommandedAmps)) return false;
+  return Math.round(targetAmps) === Math.round(lastCommandedAmps);
 }
 
 export function commandGapElapsed(now: number, lastAt: number, minIntervalMs: number): boolean {
   if (lastAt <= 0) return true;
   return now - lastAt >= minIntervalMs;
+}
+
+export function ampSendGapOpen(input: {
+  now: number;
+  lastAmpCommandAt: number;
+  commandMinIntervalMs: number;
+  commandFailureBackoffMs: number;
+  targetAmps: number;
+  lastCommandedAmps: number | null;
+  lastAmpAttemptSucceeded: boolean;
+  sessionBundleOpen: boolean;
+  explicitSession: boolean;
+}): boolean {
+  if (input.explicitSession || input.sessionBundleOpen) return true;
+  if (ampCommandIsIdenticalRepeat(input.targetAmps, input.lastCommandedAmps)) {
+    return commandGapElapsed(input.now, input.lastAmpCommandAt, input.commandMinIntervalMs);
+  }
+  if (!input.lastAmpAttemptSucceeded && input.lastAmpCommandAt > 0) {
+    return commandGapElapsed(input.now, input.lastAmpCommandAt, input.commandFailureBackoffMs);
+  }
+  return true;
+}
+
+export function startStopSendGapOpen(input: {
+  now: number;
+  lastCommandAt: number;
+  commandMinIntervalMs: number;
+  commandFailureBackoffMs: number;
+  lastAttemptSucceeded: boolean;
+  sessionBundleOpen: boolean;
+  explicitSession: boolean;
+}): boolean {
+  if (input.explicitSession || input.sessionBundleOpen) return true;
+  const gapMs = input.lastAttemptSucceeded ? input.commandMinIntervalMs : input.commandFailureBackoffMs;
+  return commandGapElapsed(input.now, input.lastCommandAt, gapMs);
 }
 
 export function budgetBlocksPaidCalls(input: {
