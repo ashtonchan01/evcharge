@@ -11,6 +11,8 @@ export interface PersistedTeslaHolds {
   authPausedUntil: number;
   /** After a 403/429/billing hold, the next contact is vehicle_data, not wake_up. */
   suppressWake: boolean;
+  /** Stop automatic vehicle_data until telemetry or owner enable. */
+  vehicleDataPaused?: boolean;
   vehicle: VehicleChargeState | null;
 }
 
@@ -19,6 +21,7 @@ const EMPTY: PersistedTeslaHolds = {
   budgetUntil: 0,
   authPausedUntil: 0,
   suppressWake: false,
+  vehicleDataPaused: false,
   vehicle: null,
 };
 
@@ -55,6 +58,7 @@ export function loadTeslaHolds(): PersistedTeslaHolds {
       budgetUntil: Number(parsed.budgetUntil) || 0,
       authPausedUntil: Number(parsed.authPausedUntil) || 0,
       suppressWake: Boolean(parsed.suppressWake),
+      vehicleDataPaused: Boolean(parsed.vehicleDataPaused),
       vehicle: restored,
     };
   } catch {
@@ -69,6 +73,7 @@ export function saveTeslaHolds(holds: PersistedTeslaHolds): void {
     budgetUntil: holds.budgetUntil,
     authPausedUntil: holds.authPausedUntil,
     suppressWake: holds.suppressWake,
+    vehicleDataPaused: holds.vehicleDataPaused ?? false,
     vehicle: holds.vehicle
       ? { ...holds.vehicle, timestamp: holds.vehicle.timestamp.toISOString() }
       : null,

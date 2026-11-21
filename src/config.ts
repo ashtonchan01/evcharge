@@ -116,17 +116,21 @@ const schema = z.object({
   // How long `auto` mode stays paused after a billing-cap response (HTTP 402
   // or a billing error body). Longer than the 403/429 cooldown on purpose.
   TESLA_API_BUDGET_COOLDOWN_MS: numeric().default("21600000"),
-  // Optional overnight window where the controller never contacts Tesla at
-  // all (no polls, no wake_up, no commands) - the car is just sitting
-  // there unplugged-from-solar-purposes, so there's nothing to check.
-  // 24h "HH:MM" in QUIET_HOURS_TIMEZONE. Leave QUIET_HOURS_START unset to
-  // disable (always check Tesla, subject to the usual telemetry/recovery
-  // throttling).
+  // Overnight window where the controller never contacts Tesla at all (no
+  // polls, no wake_up, no commands). 24h "HH:MM" in QUIET_HOURS_TIMEZONE.
+  // Defaults to 19:00-07:00 when unset. Set either variable to an empty
+  // string to disable quiet hours entirely.
   QUIET_HOURS_START: z.string().optional(),
   QUIET_HOURS_END: z.string().optional(),
   // IANA zone name (e.g. "Australia/Sydney") - the server's own clock is
   // typically UTC (cloud VM), which isn't what "7pm" means to a person.
   QUIET_HOURS_TIMEZONE: z.string().default("Australia/Sydney"),
+  // Hard cap on billed vehicle_data reads per calendar day (QUIET_HOURS_TIMEZONE).
+  // After the cap, only fleet telemetry drives state until the next day. 0 = off.
+  TESLA_VEHICLE_DATA_DAILY_CAP: numeric().default("60"),
+  // Post charge_start confirmation: max attempts and wall time before giving up.
+  TESLA_CHARGE_START_CONFIRM_MAX_ATTEMPTS: numeric().default("4"),
+  TESLA_CHARGE_START_CONFIRM_MAX_MS: numeric().default("120000"),
 
   // Web Push (browser notifications, e.g. "charging complete"). Optional -
   // leave unset to disable the feature entirely. Generate with
@@ -148,6 +152,24 @@ if (!parsed.success) {
 }
 
 const env = parsed.data;
+
+function resolveQuietHours(
+  start: string | undefined,
+  end: string | undefined
+): { quietHoursStart?: string; quietHoursEnd?: string } {
+  const startRaw = process.env.QUIET_HOURS_START;
+  const endRaw = process.env.QUIET_HOURS_END;
+  if (startRaw === "" || endRaw === "") return {};
+  if (startRaw === undefined && endRaw === undefined) {
+    return { quietHoursStart: "19:00", quietHoursEnd: "07:00" };
+  }
+  return {
+    quietHoursStart: start ?? "19:00",
+    quietHoursEnd: end ?? "07:00",
+  };
+}
+
+const quietHours = resolveQuietHours(env.QUIET_HOURS_START, env.QUIET_HOURS_END);
 
 export const config = {
   port: env.PORT!,
@@ -192,9 +214,12 @@ export const config = {
     commandFailureBackoffMs: env.TESLA_COMMAND_FAILURE_BACKOFF_MS!,
     apiBudgetMode: env.TESLA_API_BUDGET_MODE,
     apiBudgetCooldownMs: env.TESLA_API_BUDGET_COOLDOWN_MS!,
-    quietHoursStart: env.QUIET_HOURS_START || undefined,
-    quietHoursEnd: env.QUIET_HOURS_END || undefined,
+    quietHoursStart: quietHours.quietHoursStart,
+    quietHoursEnd: quietHours.quietHoursEnd,
     quietHoursTimezone: env.QUIET_HOURS_TIMEZONE,
+    vehicleDataDailyCap: env.TESLA_VEHICLE_DATA_DAILY_CAP!,
+    chargeStartConfirmMaxAttempts: env.TESLA_CHARGE_START_CONFIRM_MAX_ATTEMPTS!,
+    chargeStartConfirmMaxMs: env.TESLA_CHARGE_START_CONFIRM_MAX_MS!,
   },
 
   push: {
