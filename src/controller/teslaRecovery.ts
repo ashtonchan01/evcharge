@@ -113,6 +113,95 @@ export function budgetBlocksPaidCalls(input: {
   return !input.sessionCredit && !input.sessionBundleOpen;
 }
 
+export function isVehicleDataUnreachable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (/timed out after/i.test(err.message)) return true;
+  const status = (err as { status?: number }).status;
+  if (status === 408 || status === 504) return true;
+  const msg = err.message.toLowerCase();
+  if (/asleep|vehicle unavailable|could not wake/i.test(msg)) return true;
+  if (msg.includes("http 408") || msg.includes("http 504")) return true;
+  return false;
+}
+
+export function vehicleDataDayKey(nowMs: number, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(nowMs));
+}
+
+export function dailyVehicleDataCapReached(countToday: number, dailyCap: number): boolean {
+  if (dailyCap <= 0) return false;
+  return countToday >= dailyCap;
+}
+
+export interface ChargeStartConfirmInput {
+  now: number;
+  pending: boolean;
+  attempts: number;
+  firstAttemptAt: number;
+  lastFallbackAttemptAt: number;
+  recoveryPollMs: number;
+  maxAttempts: number;
+  maxDurationMs: number;
+}
+
+/** Whether charge_start confirmation may spend another vehicle_data (gap + cap). */
+export function chargeStartConfirmShouldPoll(input: ChargeStartConfirmInput): boolean {
+  if (!input.pending) return false;
+  if (input.attempts >= input.maxAttempts) return false;
+  if (input.firstAttemptAt > 0 && input.now - input.firstAttemptAt > input.maxDurationMs) return false;
+  const gap = Math.max(input.recoveryPollMs, 1);
+  const since =
+    input.lastFallbackAttemptAt <= 0 ? Number.POSITIVE_INFINITY : input.now - input.lastFallbackAttemptAt;
+  return since >= gap;
+}
+
+export function chargeStartConfirmCapReached(input: ChargeStartConfirmInput): boolean {
+  if (!input.pending) return false;
+  if (input.attempts >= input.maxAttempts) return true;
+  if (input.firstAttemptAt > 0 && input.now - input.firstAttemptAt > input.maxDurationMs) return true;
+  return false;
+}
+
+/** Skip paid vehicle_data when streaming or last snapshot says unplugged / away. */
+export function shouldSkipVehicleDataPoll(input: {
+  telemetryHint?: { pluggedIn: boolean; chargingState: string; lastSeenAt: Date } | null;
+  telemetryStaleMs: number;
+  now: number;
+  lastPolled?: { pluggedIn: boolean; chargingState: string; timestamp: Date } | null;
+  recoveryPollMs: number;
+}): boolean {
+  const hint = input.telemetryHint;
+  if (hint && input.now - hint.lastSeenAt.getTime() <= input.telemetryStaleMs) {
+    if (!hint.pluggedIn || hint.chargingState === "Disconnected") return true;
+  }
+  const last = input.lastPolled;
+  if (last && !last.pluggedIn) {
+    const age = input.now - new Date(last.timestamp).getTime();
+    if (age >= -5_000 && age <= input.recoveryPollMs) return true;
+  }
+  if (last?.chargingState === "Disconnected") {
+    const age = input.now - new Date(last.timestamp).getTime();
+    if (age >= -5_000 && age <= input.recoveryPollMs) return true;
+  }
+  return false;
+}
+
+/** Fresh telemetry shows the car is plugged in — may contact vehicle_data again. */
+export function telemetryResumesVehicleDataPoll(
+  hint: { pluggedIn: boolean; chargingState: string; lastSeenAt: Date } | undefined,
+  now: number,
+  telemetryStaleMs: number
+): boolean {
+  if (!hint) return false;
+  if (now - hint.lastSeenAt.getTime() > telemetryStaleMs) return false;
+  return hint.pluggedIn && hint.chargingState !== "Disconnected";
+}
+
 export interface RecoveryPlanInput {
   now: number;
   solarEnabled: boolean;
@@ -138,6 +227,11 @@ export interface RecoveryPlanInput {
   quietHours: boolean;
   /** When the budget hold ends. 0 if the hold is indefinite (mode forced on). */
   budgetUntil: number;
+  /**
+   * After vehicle_data fails (408/asleep/timeout/etc.) automatic polls stop
+   * until telemetry shows plugged-in activity or the owner turns solar on.
+   */
+  vehicleDataPaused?: boolean;
 }
 
 export interface RecoveryPlan {
@@ -148,10 +242,8 @@ export interface RecoveryPlan {
 }
 
 /**
- * Direct vehicle_data / wake_up schedule. Never sooner than recoveryPollMs
- * unless `sessionProbePending` (one user-initiated try). Wake is not repeated
- * for a failure streak — that matches the pre-existing throttle and does not
- * add wakes on top of it.
+ * Direct vehicle_data schedule while telemetry is stale. Never wakes the car.
+ * After a failed read, polls stop until telemetry or a user enable (`sessionProbePending`).
  */
 export function planRecovery(input: RecoveryPlanInput): RecoveryPlan {
   if (input.rateLimitedUntil > input.now) {
@@ -187,39 +279,28 @@ export function planRecovery(input: RecoveryPlanInput): RecoveryPlan {
     };
   }
 
+  if (input.vehicleDataPaused && !input.sessionProbePending) {
+    return {
+      shouldPoll: false,
+      shouldWake: false,
+      wait: "asleep",
+      nextAttemptAt: null,
+    };
+  }
+
   const gap = Math.max(input.recoveryPollMs, 1);
   const sincePoll =
     input.lastFallbackAttemptAt <= 0 ? Number.POSITIVE_INFINITY : input.now - input.lastFallbackAttemptAt;
-  const sinceWake =
-    input.lastWakeAttemptAt <= 0 ? Number.POSITIVE_INFINITY : input.now - input.lastWakeAttemptAt;
   const pollDue = input.sessionProbePending || sincePoll >= gap;
-  // Automatic wake only: not on the enable itself (pollForRecovery wakes
-  // once after that probe if the car stays silent), not when a hold just
-  // expired, and not when we already know the car is online. At most one
-  // automatic wake per gap, and not on a failure streak.
-  const wakeDue =
-    pollDue &&
-    !input.sessionProbePending &&
-    !input.suppressWake &&
-    !input.knownAwake &&
-    input.consecutiveFailures === 0 &&
-    sinceWake >= gap;
-  const nextPollAt = input.lastFallbackAttemptAt <= 0 ? input.now : input.lastFallbackAttemptAt + gap;
-  // "Waking" is only for a wake that has not been answered yet. A successful
-  // poll (consecutiveFailures === 0) means the car already responded — the
-  // next paid poll can still wait out `gap`, but the dashboard must not
-  // count that gap down as if the car were asleep.
-  const outOfContact = input.consecutiveFailures > 0;
-  const wokeRecently = outOfContact && input.lastWakeAttemptAt > 0 && sinceWake < gap;
 
   let wait: TeslaWait = "none";
-  if (!pollDue && outOfContact) wait = wokeRecently ? "waking" : "asleep";
+  if (!pollDue && input.consecutiveFailures > 0) wait = "asleep";
 
   return {
     shouldPoll: pollDue,
-    shouldWake: wakeDue,
+    shouldWake: false,
     wait,
-    nextAttemptAt: pollDue ? input.now : outOfContact ? nextPollAt : null,
+    nextAttemptAt: pollDue ? input.now : null,
   };
 }
 

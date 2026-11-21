@@ -162,7 +162,7 @@ describe("unplugged snapshot does not lock Tesla", () => {
     await settle(internal);
 
     assert.equal(counts.polls, 1, "turning On probes Tesla once");
-    assert.equal(counts.wakes, 1, "an asleep probe wakes once");
+    assert.equal(counts.wakes, 0, "never wake_up on a failed read");
     assert.equal(controller.getStatus().override.enabled, true);
     assert.equal(controller.getStatus().vehicle?.pluggedIn, false);
     assert.equal(controller.getStatus().vehicle?.chargingState, "Stopped");
@@ -173,23 +173,24 @@ describe("unplugged snapshot does not lock Tesla", () => {
 
     const snapshotsAfterProbe = counts.snapshots;
     await internal.tick();
-    assert.equal(counts.polls, 1, "the next tick must not busy-poll inside the recovery gap");
-    assert.equal(counts.wakes, 1);
+    assert.equal(counts.polls, 1, "the next tick must not poll while vehicle_data is paused");
+    assert.equal(counts.wakes, 0);
     assert.ok(counts.snapshots > snapshotsAfterProbe, "solar keeps updating while Tesla waits");
     assert.equal(controller.getStatus().vehicle?.pluggedIn, false);
 
     agePollClock(internal, gap);
     await internal.tick();
-    assert.equal(counts.polls, 2, "a later gap retries vehicle_data after the asleep miss");
-    assert.equal(counts.wakes, 1, "an unplugged recheck does not wake on every gap");
+    assert.equal(counts.polls, 1, "no timer retry after an asleep miss");
+    assert.equal(counts.wakes, 0);
     assert.equal(controller.getStatus().vehicle?.pluggedIn, false);
     assert.equal(controller.getStatus().override.enabled, true);
 
     online = true;
-    agePollClock(internal, gap);
-    await internal.tick();
-    assert.equal(counts.polls, 3);
-    assert.equal(counts.wakes, 1);
+    controller.setEnabled(false, "test");
+    controller.setEnabled(true, "test");
+    await settle(internal);
+    assert.equal(counts.polls, 2, "owner turning solar on is the only retry without telemetry");
+    assert.equal(counts.wakes, 0);
     assert.equal(counts.starts, 0);
     assert.equal(counts.stops, 0);
     const status = controller.getStatus();
@@ -233,7 +234,7 @@ describe("unplugged snapshot does not lock Tesla", () => {
 
     await firstInternal.tick();
     assert.equal(counts.polls, 1, "a restarted On controller must not trust the old unplugged snapshot");
-    assert.equal(counts.wakes, 1);
+    assert.equal(counts.wakes, 0);
     const persisted = loadTeslaHolds();
     assert.equal(persisted.vehicle?.pluggedIn, false);
     assert.ok(Date.now() - persisted.vehicle!.timestamp.getTime() > 20 * 60 * 60 * 1000);
@@ -243,16 +244,17 @@ describe("unplugged snapshot does not lock Tesla", () => {
     assert.equal(restarted.getStatus().vehicleTag, MODEL_X);
     assert.equal(restarted.getStatus().override.enabled, true);
     await internal.tick();
-    assert.equal(counts.polls, 2, "restarting again after the failed read still has to poll");
+    assert.equal(counts.polls, 1, "after a failed read, restart stays paused without a new enable");
     await internal.tick();
-    assert.equal(counts.polls, 2, "the follow-up waits out the recovery gap");
-    assert.equal(counts.wakes, 2, "each process wakes at most once for an asleep unplugged recheck");
+    assert.equal(counts.polls, 1, "no timer retry while paused");
+    assert.equal(counts.wakes, 0);
 
     online = true;
-    agePollClock(internal, gap);
-    await internal.tick();
-    assert.equal(counts.polls, 3);
-    assert.equal(counts.wakes, 2);
+    restarted.setEnabled(false, "test");
+    restarted.setEnabled(true, "test");
+    await settle(internal);
+    assert.equal(counts.polls, 2);
+    assert.equal(counts.wakes, 0);
     assert.equal(restarted.getStatus().vehicle?.pluggedIn, true);
     assert.equal(restarted.getStatus().vehicleTag, MODEL_X);
     assert.equal(restarted.getStatus().override.enabled, true);
@@ -300,7 +302,7 @@ describe("unplugged snapshot does not lock Tesla", () => {
     assert.ok(counts.snapshots > counts.polls);
   });
 
-  it("retries when the last read failed even if the saved unplugged snapshot is still recent", async () => {
+  it("does not timer-retry after a failed read until the owner turns solar on", async () => {
     let online = false;
     const { controller, internal, counts } = await setup(() => {
       if (!online) throw new Error("vehicle unavailable");
@@ -313,18 +315,19 @@ describe("unplugged snapshot does not lock Tesla", () => {
     internal.lastPolledVehicle = recent;
     internal.consecutiveFailures = 1;
     internal.sessionProbePending = false;
+    (internal as unknown as { vehicleDataPaused: boolean }).vehicleDataPaused = true;
     agePollClock(internal, config.tesla.telemetryRecoveryPollMs);
 
     await internal.tick();
-    assert.equal(counts.polls, 1, "a failed read must not leave a recent unplugged snapshot in force");
+    assert.equal(counts.polls, 0, "paused vehicle_data does not poll on a timer");
     assert.equal(counts.wakes, 0);
     assert.equal(controller.getStatus().override.enabled, true);
-    assert.equal(controller.getStatus().vehicle?.pluggedIn, false);
 
     online = true;
-    agePollClock(internal, config.tesla.telemetryRecoveryPollMs);
-    await internal.tick();
-    assert.equal(counts.polls, 2);
+    controller.setEnabled(false, "test");
+    controller.setEnabled(true, "test");
+    await settle(internal);
+    assert.equal(counts.polls, 1);
     assert.equal(controller.getStatus().vehicle?.pluggedIn, true);
     assert.equal(controller.getStatus().vehicleTag, MODEL_X);
     assert.equal(controller.getStatus().override.enabled, true);
@@ -404,7 +407,7 @@ describe("unplugged snapshot does not lock Tesla", () => {
     assert.ok((controller.getStatus().surplusW ?? 0) > 0);
   });
 
-  it("still wakes a plugged-in car when a later recovery poll fails", async () => {
+  it("pauses vehicle_data after a failed recovery poll and never wakes", async () => {
     const { controller, internal, counts } = await setup(() => {
       throw new Error("vehicle unavailable");
     });
@@ -422,7 +425,11 @@ describe("unplugged snapshot does not lock Tesla", () => {
     agePollClock(internal, config.tesla.telemetryRecoveryPollMs);
     await internal.tick();
     assert.equal(counts.polls, 1);
-    assert.equal(counts.wakes, 1);
+    assert.equal(counts.wakes, 0);
+    assert.equal(controller.getStatus().teslaWait, "asleep");
+    agePollClock(internal, config.tesla.telemetryRecoveryPollMs);
+    await internal.tick();
+    assert.equal(counts.polls, 1, "no timer retry while paused");
     assert.equal(controller.getStatus().vehicleTag, MODEL_X);
   });
 });

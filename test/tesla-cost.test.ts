@@ -20,9 +20,15 @@ import {
   ampSendGapOpen,
   budgetBlocksPaidCalls,
   chargeSnapshotIsAwake,
+  chargeStartConfirmCapReached,
+  chargeStartConfirmShouldPoll,
   classifyTeslaBlock,
   commandGapElapsed,
+  dailyVehicleDataCapReached,
   planRecovery,
+  shouldSkipVehicleDataPoll,
+  telemetryResumesVehicleDataPoll,
+  vehicleDataDayKey,
 } from "../src/controller/teslaRecovery.ts";
 
 const FIVE_MIN = 300_000;
@@ -133,6 +139,7 @@ describe("planRecovery", () => {
     sessionProbePending: false,
     quietHours: false,
     budgetUntil: 0,
+    vehicleDataPaused: false,
   };
 
   it("does not poll or wake inside the recovery gap", () => {
@@ -144,15 +151,16 @@ describe("planRecovery", () => {
     assert.equal(plan.nextAttemptAt, null);
   });
 
-  it("keeps a waking countdown only while the car has not answered", () => {
+  it("shows asleep with no timer when vehicle_data is paused after a miss", () => {
     const plan = planRecovery({
       ...base,
-      lastWakeAttemptAt: base.now - 10_000,
       consecutiveFailures: 2,
+      vehicleDataPaused: true,
     });
     assert.equal(plan.shouldPoll, false);
-    assert.equal(plan.wait, "waking");
-    assert.equal(plan.nextAttemptAt, base.lastFallbackAttemptAt + FIVE_MIN);
+    assert.equal(plan.shouldWake, false);
+    assert.equal(plan.wait, "asleep");
+    assert.equal(plan.nextAttemptAt, null);
   });
 
   it("allows one poll when the user just enabled solar, and still will not poll twice inside the gap", () => {
@@ -164,12 +172,24 @@ describe("planRecovery", () => {
     assert.equal(again.shouldWake, false);
   });
 
-  it("does not wake again on a failure streak once the gap elapses", () => {
+  it("does not poll again on a timer while paused, even after the recovery gap", () => {
     const plan = planRecovery({
       ...base,
       lastFallbackAttemptAt: base.now - FIVE_MIN,
-      lastWakeAttemptAt: base.now - FIVE_MIN,
       consecutiveFailures: 3,
+      vehicleDataPaused: true,
+    });
+    assert.equal(plan.shouldPoll, false);
+    assert.equal(plan.shouldWake, false);
+    assert.equal(plan.wait, "asleep");
+  });
+
+  it("allows one poll when the owner turns solar on while paused", () => {
+    const plan = planRecovery({
+      ...base,
+      vehicleDataPaused: true,
+      sessionProbePending: true,
+      consecutiveFailures: 4,
     });
     assert.equal(plan.shouldPoll, true);
     assert.equal(plan.shouldWake, false);
@@ -348,7 +368,7 @@ describe("charge command dedup and cooldowns", () => {
     assert.equal(polls.length, 1, "enabling solar polls once");
     await internal.tick();
     assert.equal(polls.length, 1, "the next tick must not poll inside the recovery gap");
-    assert.ok(wakes.length <= 1, "session probe wakes at most once");
+    assert.equal(wakes.length, 0, "never wake_up after a failed vehicle_data");
     assert.ok(starts.length <= 1, "start is not repeated on the next tick");
 
     const startsBefore = starts.length;
@@ -403,10 +423,79 @@ describe("charge command dedup and cooldowns", () => {
   });
 });
 
+describe("vehicle_data budget helpers", () => {
+  it("caps charge_start confirmation attempts and honors the recovery gap", () => {
+    const base = {
+      now: 1_000_000,
+      pending: true,
+      attempts: 0,
+      firstAttemptAt: 990_000,
+      lastFallbackAttemptAt: 1_000_000 - FIVE_MIN - 1,
+      recoveryPollMs: FIVE_MIN,
+      maxAttempts: 4,
+      maxDurationMs: 120_000,
+    };
+    assert.equal(chargeStartConfirmShouldPoll(base), true);
+    assert.equal(chargeStartConfirmShouldPoll({ ...base, lastFallbackAttemptAt: base.now - 1_000 }), false);
+    assert.equal(chargeStartConfirmCapReached({ ...base, attempts: 4 }), true);
+    assert.equal(chargeStartConfirmCapReached({ ...base, now: base.firstAttemptAt + 121_000 }), true);
+  });
+
+  it("skips polls when telemetry or last snapshot is unplugged", () => {
+    const now = Date.now();
+    assert.equal(
+      shouldSkipVehicleDataPoll({
+        telemetryHint: { pluggedIn: false, chargingState: "Stopped", lastSeenAt: new Date(now) },
+        telemetryStaleMs: 600_000,
+        now,
+        recoveryPollMs: FIVE_MIN,
+      }),
+      true
+    );
+    assert.equal(
+      shouldSkipVehicleDataPoll({
+        telemetryHint: { pluggedIn: true, chargingState: "Charging", lastSeenAt: new Date(now) },
+        telemetryStaleMs: 600_000,
+        now,
+        recoveryPollMs: FIVE_MIN,
+      }),
+      false
+    );
+  });
+
+  it("detects daily vehicle_data cap", () => {
+    assert.equal(dailyVehicleDataCapReached(59, 60), false);
+    assert.equal(dailyVehicleDataCapReached(60, 60), true);
+    assert.equal(dailyVehicleDataCapReached(100, 0), false);
+    assert.ok(vehicleDataDayKey(Date.now(), "Australia/Sydney").length >= 8);
+  });
+
+  it("resumes vehicle_data only when telemetry shows plugged in", () => {
+    const now = Date.now();
+    assert.equal(
+      telemetryResumesVehicleDataPoll(
+        { pluggedIn: true, chargingState: "Stopped", lastSeenAt: new Date(now) },
+        now,
+        600_000
+      ),
+      true
+    );
+    assert.equal(
+      telemetryResumesVehicleDataPoll(
+        { pluggedIn: false, chargingState: "Disconnected", lastSeenAt: new Date(now) },
+        now,
+        600_000
+      ),
+      false
+    );
+  });
+});
+
 describe("charge_start confirmation", () => {
   it("leaves Stopped / 0 V after charge_start and confirms Charging on the next poll", async () => {
     useFreshHoldsFile();
     const { ChargeController } = await import("../src/controller/index.ts");
+    const { config } = await import("../src/config.ts");
 
     let starts = 0;
     let pollsAfterStart = 0;
@@ -486,14 +575,71 @@ describe("charge_start confirmation", () => {
     assert.equal(afterStart.decision, "charging");
     assert.equal(internal.chargeStartConfirmPending, true);
 
-    // Next tick polls again inside the recovery gap and picks up live fields.
+    // Next eligible tick (recovery gap) confirms live fields — not every 30s tick.
     internal.sessionProbePending = false;
+    internal.lastFallbackAttemptAt = Date.now() - config.tesla.telemetryRecoveryPollMs - 1_000;
     await internal.tick();
     const confirmed = controller.getStatus();
     assert.equal(confirmed.vehicle?.chargingState, "Charging");
     assert.equal(confirmed.vehicle?.chargerVoltage, 243);
     assert.equal(confirmed.vehicle?.chargerActualCurrent, 5);
     assert.equal(confirmed.decision, "charging");
+    assert.equal(internal.chargeStartConfirmPending, false);
+  });
+
+  it("does not poll every tick while confirm is pending and the car returns 408", async () => {
+    useFreshHoldsFile();
+    const { ChargeController } = await import("../src/controller/index.ts");
+    const { TeslaApiError } = await import("../src/tesla/client.ts");
+    const { config } = await import("../src/config.ts");
+
+    let polls = 0;
+    const goodwe = {
+      async getSnapshot() {
+        return {
+          timestamp: new Date(),
+          pvPowerW: 5000,
+          loadPowerW: 400,
+          gridPowerW: -4600,
+          batteryPowerW: 0,
+          batterySoc: 0,
+        };
+      },
+    };
+    const tesla = {
+      getVehicleTag: () => "5YJ3TESTVIN000001",
+      setVehicleTag() {},
+      async getChargeState() {
+        polls += 1;
+        throw new TeslaApiError("HTTP 408 vehicle asleep", 408);
+      },
+      async wakeUp() {},
+      async startCharging() {},
+      async stopCharging() {},
+      async setChargeAmps() {},
+    };
+
+    const controller = new ChargeController(goodwe as never, tesla as never, null);
+    const internal = controller as unknown as {
+      tick(): Promise<void>;
+      chargeStartConfirmPending: boolean;
+      lastFallbackAttemptAt: number;
+      sendStart(): Promise<string>;
+    };
+
+    controller.setEnabled(true, "test");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const pollsAfterEnable = polls;
+    internal.lastFallbackAttemptAt = Date.now() - config.tesla.telemetryRecoveryPollMs - 1_000;
+    await internal.sendStart();
+    const pollsAfterStart = polls - pollsAfterEnable;
+    assert.ok(pollsAfterStart <= 2, "at most immediate confirm plus one retry");
+
+    for (let i = 0; i < 5; i += 1) {
+      internal.lastFallbackAttemptAt = Date.now() - config.tesla.telemetryRecoveryPollMs - 1_000;
+      await internal.tick();
+    }
+    assert.ok(polls - pollsAfterEnable <= 4, "confirm path must not hammer vehicle_data");
     assert.equal(internal.chargeStartConfirmPending, false);
   });
 });
@@ -712,7 +858,7 @@ describe("GET /api/vehicles cache", () => {
 });
 
 describe("enable solar inside the recovery gap", () => {
-  it("clears the waking countdown, polls, and wakes once", async () => {
+  it("clears the asleep wait and polls once without wake_up", async () => {
     useFreshHoldsFile();
     const { ChargeController } = await import("../src/controller/index.ts");
     const polls: number[] = [];
@@ -752,23 +898,24 @@ describe("enable solar inside the recovery gap", () => {
     internal.lastFallbackAttemptAt = now;
     internal.lastWakeAttemptAt = now;
     internal.consecutiveFailures = 2;
-    controller.getStatus().teslaWait = "waking";
+    (internal as unknown as { vehicleDataPaused: boolean }).vehicleDataPaused = true;
+    controller.getStatus().teslaWait = "asleep";
     controller.getStatus().nextTeslaAttemptAt = new Date(now + 9 * 60 * 1000);
 
     controller.setEnabled(true, "test");
     const next = controller.getStatus().nextTeslaAttemptAt;
     const stillWaitingOutTheGap = next !== null && next.getTime() - Date.now() > 60_000;
     assert.equal(stillWaitingOutTheGap, false);
-    assert.notEqual(controller.getStatus().teslaWait, "waking");
+    assert.notEqual(controller.getStatus().teslaWait, "asleep");
 
-    for (let i = 0; i < 50 && (internal.tickInFlight || wakes.length === 0); i += 1) {
+    for (let i = 0; i < 50 && internal.tickInFlight; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(polls.length, 1);
-    assert.equal(wakes.length, 1);
+    assert.equal(wakes.length, 0);
 
     await internal.tick();
-    assert.equal(wakes.length, 1);
-    assert.equal(polls.length, 1);
+    assert.equal(wakes.length, 0);
+    assert.equal(polls.length, 1, "no extra poll while paused after the enable probe fails");
   });
 });
